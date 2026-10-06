@@ -53,6 +53,7 @@
           class="chat-references-panel__source"
           :target="sourceTarget"
           :active="visible"
+          :project-code="projectCode"
           @unavailable="onSourceUnavailable"
         />
 
@@ -195,6 +196,7 @@ import {
 const props = defineProps<{
   embeddedMode?: boolean
   overlayBreakpoint?: number
+  projectCode?: string
 }>()
 
 const { t } = useI18n()
@@ -211,7 +213,7 @@ const visible = computed(() => drawer?.visible.value ?? false)
 const references = computed(() => drawer?.references.value ?? [])
 const highlight = computed(() => drawer?.highlight.value ?? null)
 // The embed has no access to original files, so it always lists sources.
-const sourceTarget = computed(() => (props.embeddedMode ? null : drawer?.source.value ?? null))
+const sourceTarget = computed(() => (props.embeddedMode && !props.projectCode ? null : drawer?.source.value ?? null))
 
 const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const onViewportResize = () => {
@@ -235,7 +237,7 @@ onMounted(() => {
 })
 
 const useOverlay = computed(() => {
-  if (props.embeddedMode) return true
+  if (props.embeddedMode && !props.projectCode) return true
   return viewportWidth.value < (props.overlayBreakpoint ?? 960)
 })
 
@@ -267,7 +269,7 @@ function savePanelWidths() {
 }
 
 function canOpenSource(item: ReferenceListItem) {
-  return !props.embeddedMode && item.kind === 'document' && !!item.knowledgeId && !!item.chunkId
+  return (!props.embeddedMode || !!props.projectCode) && item.kind === 'document' && !!item.knowledgeId && !!item.chunkId
 }
 
 function openItemSource(item: ReferenceListItem) {
@@ -382,6 +384,13 @@ function toggleDocumentSnippet(item: ReferenceListItem, event?: MouseEvent) {
 
 function getDocumentHref(item: ReferenceListItem) {
   if (!item.knowledgeBaseId) return ''
+  if (props.projectCode) {
+    return router.resolve({
+      name: 'pixlabProjectKnowledge',
+      params: { projectCode: props.projectCode },
+      query: item.knowledgeId ? { knowledge_id: item.knowledgeId } : {},
+    }).href
+  }
   const query: Record<string, string> = {}
   if (item.knowledgeId) query.knowledge_id = item.knowledgeId
   return router.resolve({

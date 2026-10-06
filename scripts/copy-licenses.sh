@@ -17,6 +17,7 @@ source_stage="$(mktemp -d)"
 trap 'rm -rf "${source_stage}"' EXIT
 module_cache="$(cd "${license_root}" && go env GOMODCACHE)"
 while read -r module_name module_version _checksum; do
+    _checksum="${_checksum%$'\r'}"
     (cd "${license_root}" && go mod download "${module_name}@${module_version}")
     cp "${module_cache}/cache/download/${module_name}/@v/${module_version}.zip" \
         "${source_stage}/${module_name##*/}-${module_version}.zip"

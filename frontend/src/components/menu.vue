@@ -2,12 +2,12 @@
     <div class="aside_box" :class="{ 'aside_box--collapsed': uiStore.sidebarCollapsed, 'aside_box--resizing': uiStore.sidebarResizing }">
         <!-- 展开时：Logo + 搜索/折叠按钮同行 -->
         <div class="logo_row" v-if="!uiStore.sidebarCollapsed">
-            <div class="logo_box" @click="router.push('/platform/knowledge-bases')" style="cursor: pointer;">
+            <div class="logo_box" @click="goMenuHome" style="cursor: pointer;">
                 <img class="logo" src="@/assets/img/weknora.png" alt="">
                 <sup v-if="isLiteEdition" class="lite-badge">Lite</sup>
             </div>
             <div class="logo_actions">
-                <t-tooltip placement="bottom">
+                <t-tooltip v-if="!pixlabProject" placement="bottom">
                     <template #content>
                         <span class="cmdk-tip">
                             <span class="cmdk-tip-label">{{ t('menu.search') }}</span>
@@ -50,7 +50,7 @@
         </t-tooltip>
 
         <!-- 空间选择器：仅在用户可切换空间时显示 -->
-        <TenantSelector v-if="canAccessAllTenants && !uiStore.sidebarCollapsed" />
+        <TenantSelector v-if="!pixlabProject && canAccessAllTenants && !uiStore.sidebarCollapsed" />
 
         <!-- 侧栏边缘拖拽调宽，拖窄时自动收缩 -->
         <PanelResizeHandle edge="right" :label="t('knowledgeStages.resizeDrawer')"
@@ -61,7 +61,7 @@
         <div class="menu_top" ref="scrollContainer" @scroll="handleScroll">
             <!-- 全局搜索入口：点击打开命令面板（⌘K）。展开态移至顶部 logo_row 的图标按钮；
                  折叠态在此处保留为图标项 + 深色 tooltip。 -->
-            <div class="menu_box menu_box--cmdk" v-if="uiStore.sidebarCollapsed">
+            <div class="menu_box menu_box--cmdk" v-if="!pixlabProject && uiStore.sidebarCollapsed">
                 <t-tooltip placement="right">
                     <template #content>
                         <span class="cmdk-tip">
@@ -144,7 +144,9 @@
                         </div>
                     </template>
                     <template v-else-if="activeBucket?.loaded && filteredGroupedSessions.length === 0">
-                        <div class="submenu_empty">{{ t('menu.noSessions') }}</div>
+                        <div class="submenu_empty" :class="{ 'is-error': pixlabProject && projectSessionsError }">
+                            {{ pixlabProject && projectSessionsError ? projectSessionsError : t('menu.noSessions') }}
+                        </div>
                     </template>
                     <template v-else>
                         <template v-for="group in filteredGroupedSessions" :key="group.key">
@@ -162,7 +164,7 @@
                                 <div class="session-list-row session-list-row--flat">
                                     <div class="session-list-row__body">
                                         <SessionSidebarRow :item="subitem" :batch-mode="batchMode"
-                                            :running="Boolean(sessionActivityEntries[subitem.id])"
+                                            :running="!pixlabProject && Boolean(sessionActivityEntries[subitem.id])"
                                             :active-path="currentSecondpath" :selected-ids="batchSelectedIds"
                                             :menu-options="buildSessionMenuOptions(subitem)"
                                             @navigate="gotopage(subitem.path)"
@@ -206,7 +208,11 @@
 
         <!-- 下半部分：用户菜单 -->
         <div class="menu_bottom">
-            <UserMenu />
+            <UserMenu v-if="!pixlabProject" />
+            <div v-else-if="!uiStore.sidebarCollapsed" class="pixlab-project-caption">
+                <strong :title="pixlabContext?.project_name || projectCode">{{ pixlabContext?.project_name || projectCode }}</strong>
+                <span>{{ pixlabContext?.knowledge_base.name || t('menu.knowledgeBase') }}</span>
+            </div>
         </div>
 
     </div>
@@ -214,7 +220,7 @@
 
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-import { onMounted, onUnmounted, watch, computed, ref, h, nextTick } from 'vue';
+import { onMounted, onUnmounted, watch, computed, ref, h, nextTick, inject } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { getSessionsList, batchDelSessions, deleteAllSessions, getSession } from "@/api/chat/index";
 import { useChatResourcesStore } from '@/stores/chatResources';
@@ -278,6 +284,16 @@ import UserMenu from '@/components/UserMenu.vue';
 import TenantSelector from '@/components/TenantSelector.vue';
 import { useI18n } from 'vue-i18n';
 import { useEditorResourcesStore } from '@/stores/editorResources';
+import { deleteChatSession, listChatSessions, type WorkbenchSession } from '@/pixlab-workbench/api';
+import { PIXLAB_PROJECT_CONTEXT } from '@/pixlab-workbench/context';
+import { PIXLAB_SESSIONS_CHANGED_EVENT } from '@/pixlab-workbench/events';
+
+const props = withDefaults(defineProps<{ pixlabProject?: boolean }>(), {
+    pixlabProject: false,
+});
+const pixlabProject = computed(() => props.pixlabProject);
+const pixlabContextRef = inject(PIXLAB_PROJECT_CONTEXT, ref(null));
+const pixlabContext = computed(() => pixlabContextRef.value);
 
 const chatResources = useChatResourcesStore();
 const editorResources = useEditorResourcesStore();
@@ -329,7 +345,7 @@ const browserStackStatus = computed(() => {
     return browserConnection.connected ? 'connected' : 'offline';
 });
 watch(() => uiStore.sidebarBrowserStatus && toolboxPreview.value.some((tool) => tool.key === 'browserconnection'), (visible) => {
-    if (visible && !browserConnection.loaded) browserConnection.refresh().catch(() => {});
+    if (!pixlabProject.value && visible && !browserConnection.loaded) browserConnection.refresh().catch(() => {});
 }, { immediate: true });
 const commandPaletteStore = useCommandPaletteStore();
 
@@ -340,6 +356,14 @@ const isMacLike = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.tes
 const cmdModKeyLabel = isMacLike ? '⌘' : 'Ctrl';
 const route = useRoute();
 const router = useRouter();
+const projectCode = computed(() => String(route.params.projectCode || pixlabContext.value?.project_code || ''));
+const projectSessions = ref<WorkbenchSession[]>([]);
+const projectSessionsPage = ref(0);
+const projectSessionsTotal = ref(0);
+const projectSessionsLoading = ref(false);
+const projectSessionsLoaded = ref(false);
+const projectSessionsError = ref('');
+let projectSessionsRequest = 0;
 const currentpath = ref('');
 const total = ref(0);
 const sessionBuckets = ref<Record<string, SidebarSessionBucket>>({});
@@ -374,9 +398,19 @@ const sessionSourceOptions = computed(() =>
         (platform) => platformLogo(platform),
     ),
 );
-const activeBucket = computed(() => sessionBuckets.value[activeSessionBucketKey.value]);
+const activeBucket = computed<any>(() => pixlabProject.value
+    ? {
+        items: projectSessions.value,
+        loading: projectSessionsLoading.value,
+        loaded: projectSessionsLoaded.value,
+        page: projectSessionsPage.value,
+        total: projectSessionsTotal.value,
+    }
+    : sessionBuckets.value[activeSessionBucketKey.value]);
 const hasAnySession = computed(() =>
-    Object.values(sessionBuckets.value).some((bucket) => bucket.items.length > 0),
+    pixlabProject.value
+        ? projectSessions.value.length > 0
+        : Object.values(sessionBuckets.value).some((bucket) => bucket.items.length > 0),
 );
 type MenuItem = { title: string; icon: string; path: string; childrenPath?: string; children?: any[] };
 const { menuArr, visibleMenuArr } = storeToRefs(usemenuStore);
@@ -439,6 +473,12 @@ const isInOrganizationList = computed<boolean>(() => route.name === 'organizatio
 const isMenuItemActive = (itemPath: string): boolean => {
     const currentRoute = route.name;
 
+    if (pixlabProject.value) {
+        if (itemPath === 'knowledge-bases') return currentRoute === 'pixlabProjectKnowledge';
+        if (itemPath === 'creatChat') return currentRoute === 'pixlabProjectNewChat';
+        return false;
+    }
+
     switch (itemPath) {
         case 'knowledge-bases':
             return currentRoute === 'knowledgeBaseList' ||
@@ -481,6 +521,12 @@ const getIconActiveState = (itemPath: string) => {
 const TOP_MENU_PATHS = new Set(['creatChat', 'knowledge-bases', 'artifacts', 'agents', 'toolbox', 'organizations']);
 
 const topMenuItems = computed<MenuItem[]>(() => {
+    if (pixlabProject.value) {
+        return [
+            { title: t('menu.newChat'), icon: 'prefixIcon', path: 'creatChat' },
+            { title: pixlabContext.value?.knowledge_base.name || t('menu.knowledgeBase'), icon: 'zhishiku', path: 'knowledge-bases' },
+        ];
+    }
     return (visibleMenuArr.value as unknown as MenuItem[]).filter((item: MenuItem) => TOP_MENU_PATHS.has(item.path));
 });
 
@@ -507,14 +553,15 @@ const dateBucketLabels = computed<Record<DateBucketKey, string>>(() => ({
 }));
 
 const filteredGroupedSessions = computed(() => {
-    const bucket = activeBucket.value;
-    if (!bucket?.items.length) return [];
-    return groupSessionsByDate(
-        bucket.items.map((item) => ({
+    const items = pixlabProject.value ? projectSessions.value : activeBucket.value?.items;
+    if (!items?.length) return [];
+    const rows: Array<SessionForGrouping & { path: string; title: string }> = items.map((item: any) => ({
             ...item,
             path: `chat/${item.id}`,
             title: item.title || '',
-        })),
+        }));
+    return groupSessionsByDate<SessionForGrouping & { path: string; title: string }>(
+        rows,
         dateBucketLabels.value,
         (session) => classifyDateBucket(session.updated_at || session.created_at),
     );
@@ -668,6 +715,10 @@ const handleInlineBatchDelete = () => {
 }
 
 const handleSessionMenuClick = (data: { value: string }, item: any) => {
+    if (pixlabProject.value) {
+        if (data?.value === 'delete') void deleteProjectSession(item.id);
+        return;
+    }
     if (data?.value === 'delete') {
         delCard(item);
     } else if (data?.value === 'clearMessages') {
@@ -682,6 +733,9 @@ const handleSessionMenuClick = (data: { value: string }, item: any) => {
 // 基于会话来源推导展示用的短标签已经被 platformLogo(<img>) 取代，Web 会话没有图标。
 
 const buildSessionMenuOptions = (item: any) => {
+    if (pixlabProject.value) {
+        return [{ content: t('upload.deleteRecord'), value: 'delete', theme: 'error', prefixIcon: () => h(TIcon, { name: 'delete' }) }];
+    }
     const options: any[] = [];
     if (item.is_pinned) {
         options.push({
@@ -977,6 +1031,12 @@ const getMessageList = async () => {
 // 滚动到底时为当前筛选来源加载下一页
 const checkScrollBottom = async () => {
     const container = scrollContainer.value;
+    if (pixlabProject.value) {
+        if (!container || projectSessionsLoading.value || projectSessions.value.length >= projectSessionsTotal.value) return;
+        const { scrollTop, scrollHeight, clientHeight } = container;
+        if (scrollHeight - (scrollTop + clientHeight) < 100) await loadProjectSessions(projectSessionsPage.value + 1, true);
+        return;
+    }
     const key = activeSessionBucketKey.value;
     const bucket = sessionBuckets.value[key];
     if (!container || !bucket || !bucketHasMore(bucket) || bucket.loading) return;
@@ -1050,6 +1110,15 @@ const handleSessionMutation = (event: Event) => {
 };
 
 onMounted(async () => {
+    if (pixlabProject.value) {
+        currentpath.value = String(route.name || '');
+        currentSecondpath.value = route.params.chatid ? `chat/${route.params.chatid}` : '';
+        sessionListBooting.value = true;
+        await loadProjectSessions(1);
+        sessionListBooting.value = false;
+        window.addEventListener(PIXLAB_SESSIONS_CHANGED_EVENT, handleProjectSessionsChanged);
+        return;
+    }
     sessionActivityTimer = setInterval(() => { void sessionActivity.refresh(); }, 5000);
     const routeName = typeof route.name === 'string' ? route.name : (route.name ? String(route.name) : '')
     currentpath.value = routeName;
@@ -1087,9 +1156,15 @@ onUnmounted(() => {
     clearTimeout(forkRevealTimer);
     sessionActivity.clear();
     window.removeEventListener(SESSION_MUTATION_EVENT, handleSessionMutation);
+    window.removeEventListener(PIXLAB_SESSIONS_CHANGED_EVENT, handleProjectSessionsChanged);
 });
 
 watch([() => route.name, () => route.params], (newvalue, oldvalue) => {
+    if (pixlabProject.value) {
+        currentpath.value = String(newvalue[0] || '');
+        currentSecondpath.value = newvalue[1].chatid ? `chat/${newvalue[1].chatid}` : '';
+        return;
+    }
     const nameStr = typeof newvalue[0] === 'string' ? (newvalue[0] as string) : (newvalue[0] ? String(newvalue[0]) : '')
     currentpath.value = nameStr;
     if (newvalue[1].chatid) {
@@ -1157,6 +1232,14 @@ const getIcon = (path: string) => {
 }
 getIcon(typeof route.name === 'string' ? route.name as string : (route.name ? String(route.name) : ''))
 const handleMenuClick = async (path: string) => {
+    if (pixlabProject.value) {
+        if (path === 'knowledge-bases') {
+            await router.push({ name: 'pixlabProjectKnowledge', params: { projectCode: projectCode.value } });
+        } else if (path === 'creatChat') {
+            await router.push({ name: 'pixlabProjectNewChat', params: { projectCode: projectCode.value } });
+        }
+        return;
+    }
     if (path === 'knowledge-bases') {
         // 知识库菜单项：如果在知识库内部，跳转到当前知识库文件页；否则跳转到知识库列表
         const kbId = await getCurrentKbId()
@@ -1193,6 +1276,17 @@ const getCurrentKbId = async (): Promise<string | null> => {
 }
 
 const gotopage = async (path: string) => {
+    if (pixlabProject.value) {
+        if (path.startsWith('chat/')) {
+            await router.push({
+                name: 'pixlabProjectChat',
+                params: { projectCode: projectCode.value, chatid: path.slice('chat/'.length) },
+            });
+        } else {
+            await handleMenuClick(path);
+        }
+        return;
+    }
     pathPrefix.value = path;
     // 处理退出登录
     if (path === 'logout') {
@@ -1232,6 +1326,58 @@ const mouseenteMenu = (path: string) => {
 }
 const mouseleaveMenu = (path: string) => {
 }
+
+const goMenuHome = () => {
+    if (pixlabProject.value) {
+        void router.push({ name: 'pixlabProjectKnowledge', params: { projectCode: projectCode.value } });
+    } else {
+        void router.push('/platform/knowledge-bases');
+    }
+};
+
+async function loadProjectSessions(page = 1, append = false) {
+    const code = projectCode.value;
+    if (!code || projectSessionsLoading.value) return;
+    const request = ++projectSessionsRequest;
+    projectSessionsLoading.value = true;
+    projectSessionsError.value = '';
+    try {
+        const result = await listChatSessions(code, page, SIDEBAR_BUCKET_PAGE_SIZE);
+        if (request !== projectSessionsRequest) return;
+        const seen = new Set<string>();
+        const rows = (append ? [...projectSessions.value, ...result.sessions] : result.sessions)
+            .filter((session) => !seen.has(session.id) && seen.add(session.id));
+        projectSessions.value = rows;
+        projectSessionsPage.value = result.page;
+        projectSessionsTotal.value = result.total;
+        projectSessionsLoaded.value = true;
+    } catch (cause) {
+        if (request === projectSessionsRequest) {
+            projectSessionsError.value = cause instanceof Error ? cause.message : t('error.loadFailed');
+            projectSessionsLoaded.value = true;
+        }
+    } finally {
+        if (request === projectSessionsRequest) projectSessionsLoading.value = false;
+    }
+}
+
+async function deleteProjectSession(sessionId: string) {
+    try {
+        await deleteChatSession(projectCode.value, sessionId);
+        projectSessions.value = projectSessions.value.filter((session) => session.id !== sessionId);
+        projectSessionsTotal.value = Math.max(0, projectSessionsTotal.value - 1);
+        if (String(route.params.chatid || '') === sessionId) {
+            await router.push({ name: 'pixlabProjectNewChat', params: { projectCode: projectCode.value } });
+        }
+    } catch (cause) {
+        MessagePlugin.error(cause instanceof Error ? cause.message : t('chat.deleteSessionFailed'));
+    }
+}
+
+const handleProjectSessionsChanged = () => {
+    projectSessionsLoaded.value = false;
+    void loadProjectSessions(1);
+};
 
 let sidebarResizeStartWidth = 0
 const startSidebarResize = () => {
@@ -1417,6 +1563,23 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
+    }
+
+    .pixlab-project-caption {
+        display: grid;
+        gap: 2px;
+        padding: 10px var(--sidebar-inset-x) 8px;
+        border-top: 1px solid var(--td-component-stroke);
+
+        strong,
+        span {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        strong { font-size: var(--app-text-sm); }
+        span { color: var(--td-text-color-placeholder); font-size: var(--app-text-xs); }
     }
 
     .menu_box {
@@ -1781,6 +1944,8 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
     font-size: var(--app-text-sm);
     color: var(--td-text-color-placeholder);
     user-select: none;
+
+    &.is-error { color: var(--td-error-color); }
 }
 
 // 顶部 logo_row 右侧的图标按钮组（搜索 + 折叠），与折叠按钮风格一致

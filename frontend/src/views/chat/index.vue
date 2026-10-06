@@ -2,7 +2,7 @@
     <div class="chat" :class="{
         'is-embedded': embeddedMode,
         'has-references-panel': referencesDrawerVisible,
-        'has-sandbox-panel': sandboxPanel.visible.value,
+        'has-sandbox-panel': !pixlabProject && sandboxPanel.visible.value,
     }" :style="{
         '--sandbox-panel-width': `${sandboxPanel.width.value}px`,
         '--references-panel-width': `${referencesPanelWidth}px`,
@@ -26,11 +26,11 @@
             </div>
         </div>
         <div class="chat_thread" :style="{ '--chat-composer-height': `${composerHeight}px`, '--chat-scrollbar-gutter': `${scrollbarGutter}px` }">
-            <div ref="scrollContainer" class="chat_scroll_box" @scroll="handleScroll">
+            <div ref="scrollContainer" class="chat_scroll_box" @scroll="renderHandleScroll">
                 <div class="chat_scroll_content">
                     <div class="msg_list" :class="{ 'is-embedded': embeddedMode }">
                         <!-- 消息列表骨架屏 -->
-                        <div v-if="historyLoading && messagesList.length === 0" class="msg-skeleton-list">
+                        <div v-if="renderHistoryLoading && renderMessagesList.length === 0" class="msg-skeleton-list">
                             <div class="msg-skeleton msg-skeleton-user">
                                 <t-skeleton animation="gradient"
                                     :row-col="[{ width: '45%', height: '36px', type: 'rect' }]" />
@@ -49,7 +49,7 @@
                             </div>
                         </div>
                         <!-- 推荐问题卡片 - 仅在新会话（无消息）时展示 -->
-                        <div v-if="!embeddedMode && messagesList.length === 0 && !loading"
+                        <div v-if="!pixlabProject && !embeddedMode && renderMessagesList.length === 0 && !renderLoading"
                             class="suggested-questions-container"
                             :class="{ 'has-questions': suggestedQuestions.length > 0 || suggestedQuestionsLoading }">
                             <!-- 骨架屏占位 -->
@@ -101,21 +101,21 @@
                       这是历史加载时白屏 + layout shift 蔓延到 session 列表的根因。
                       仅对极少数尚未拿到 id 的本地占位消息 fallback 到 role+created_at+index。
                     -->
-                        <div v-for="(session, index) in messagesList"
+                        <div v-for="(session, index) in renderMessagesList"
                             :key="session.id || `${session.role}-${session.created_at}-${index}`" class="msg-item-wrapper"
-                            :class="{ 'is-steer-prefix': session.steerForked, 'is-empty-segment': session.role === 'assistant' && !shouldRenderAssistantMessage(session) }">
-                            <MessageTimestamp v-if="shouldShowConversationTimestamp(messagesList, index)"
+                            :class="{ 'is-steer-prefix': session.steerForked, 'is-empty-segment': session.role === 'assistant' && !renderShouldAssistantMessage(session) }">
+                            <MessageTimestamp v-if="shouldShowConversationTimestamp(renderMessagesList, index)"
                                 :value="session.created_at" />
 
                             <div v-if="session.role == 'user'" class="message-row"
                                 :data-message-id="session.id || undefined">
                                 <usermsg :content="session.content" :mentioned_items="session.mentioned_items"
                                     :images="session.images" :attachments="session.attachments" :embeddedMode="embeddedMode"
-                                    :session-id="session_id"
+                                    :session-id="renderSessionId"
                                     :message-id="session.id"
                                     :created-at="session.created_at"
                                     :can-fork="!embeddedMode && forkAffordanceOf(session.id).canFork"
-                                    :can-rewind="canRewindMessage(session.id)"
+                                    :can-rewind="!pixlabProject && canRewindMessage(session.id)"
                                     :steer-failed="Boolean(session._steerFailed)"
                                     @retry-steer="handleRetrySteer(session.steer_id)"
                                     @remove-steer="handleRemoveSteer(session.steer_id)"
@@ -123,20 +123,20 @@
                                     @rewind="handleRewind">
                                 </usermsg>
                             </div>
-                            <div v-if="session.role == 'assistant' && shouldRenderAssistantMessage(session)"
+                            <div v-if="session.role == 'assistant' && renderShouldAssistantMessage(session)"
                                 class="message-row"
                                 :data-message-id="session.id || undefined">
-                                <botmsg :content="session.content" :session="session" :session-id="session_id"
-                                    :user-query="getUserQuery(index)" @scroll-bottom="scrollToBottom"
-                                    :isFirstEnter="isFirstEnter" :embeddedMode="embeddedMode"
+                                <botmsg :content="session.content" :session="session" :session-id="renderSessionId"
+                                    :user-query="renderGetUserQuery(index)" @scroll-bottom="renderScrollToBottom"
+                                    :isFirstEnter="pixlabProject ? false : isFirstEnter" :embeddedMode="embeddedMode"
                                     :follow-up-loading="Boolean(session.suggestionLoading && !session.suggestionSet?.questions?.length)"
                                     :can-fork="!embeddedMode && forkAffordanceOf(session.id).canFork"
-                                    :can-rewind="canRewindMessage(session.id)"
+                                    :can-rewind="!pixlabProject && canRewindMessage(session.id)"
                                     @fork="handleFork"
                                     @rewind="handleRewind"
                                     @render-complete-change="(ready) => handleAnswerRenderComplete(session, ready)">
                                 </botmsg>
-                                <FollowUpSuggestions v-if="session.answerFullyRendered && !session.steerForked && !session.suggestionsDismissed"
+                                <FollowUpSuggestions v-if="!pixlabProject && session.answerFullyRendered && !session.steerForked && !session.suggestionsDismissed"
                                     :suggestion-set="session.suggestionSet"
                                     :loading="session.suggestionLoading"
                                     :allow-regenerate="session.suggestionSet?.allow_regenerate"
@@ -146,7 +146,7 @@
                                     @dismiss="(set) => dismissSuggestions(session, set)" />
                             </div>
                         </div>
-                        <div v-if="showGlobalTypingIndicator" class="chat-global-wait" role="status"
+                        <div v-if="renderShowGlobalTypingIndicator" class="chat-global-wait" role="status"
                             :aria-label="t('chat.thinkingAlt')">
                             <span class="chat-global-wait__spinner" aria-hidden="true"></span>
                         </div>
@@ -156,36 +156,36 @@
             <div ref="composerElement" class="chat_composer">
                 <div class="input-container" :class="{ 'is-embedded': embeddedMode }">
                     <transition name="scroll-btn-fade">
-                        <div v-show="userHasScrolledUp" class="scroll-to-bottom-btn" @click="onClickScrollToBottom">
+                        <div v-show="renderUserHasScrolledUp" class="scroll-to-bottom-btn" @click="renderOnClickScrollToBottom">
                             <t-icon name="chevron-down" size="18px" />
                         </div>
                     </transition>
-                    <InputField ref="inputFieldRef" :auto-focus="focusComposerOnMount" :compact="!embeddedMode"
-                        @send-msg="(query, modelId, mentionedItems, imageFiles, attachmentFiles, options) => sendMsg(query, modelId, mentionedItems, imageFiles, attachmentFiles, options)"
+                    <InputField ref="inputFieldRef" :auto-focus="focusComposerOnMount" :compact="pixlabProject || !embeddedMode"
+                        @send-msg="renderSendMsg"
                         @steer-msg="(query, mentionedItems, delivery) => handleSteerMsg(query, mentionedItems, delivery)"
                         @promote-steer="handlePromoteSteer"
                         @remove-steer="handleRemoveSteer"
                         @retry-steer="handleRetrySteer"
-                        @stop-generation="handleStopGeneration"
+                        @stop-generation="renderStopGeneration"
                         @stop-confirmed="handleStopConfirmed"
-                        @stop-failed="handleStopFailed" :isReplying="isReplying" :composer-locked="composerLocked" :sessionId="session_id"
-                        :assistantMessageId="currentAssistantMessageId" :embeddedMode="embeddedMode"
-                        :queuedSteers="steerQueue.filter(item => item.delivery === 'after')" :canSteer="isAgentStreamSession()"></InputField>
+                        @stop-failed="handleStopFailed" :isReplying="renderIsReplying" :composer-locked="!pixlabProject && composerLocked" :sessionId="renderSessionId"
+                        :assistantMessageId="renderAssistantMessageId" :embeddedMode="embeddedMode" :external-stop="pixlabProject"
+                        :queuedSteers="pixlabProject ? [] : steerQueue.filter(item => item.delivery === 'after')" :canSteer="!pixlabProject && isAgentStreamSession()"></InputField>
                 </div>
             </div>
             <div v-if="!embeddedMode" class="chat_overlays">
                 <BrowserTaskPreview v-if="session_id" :key="session_id" :session-id="session_id" />
-                <ChatQuestionMinimap :scroll-container="scrollContainer" :messages="messagesList"
+                <ChatQuestionMinimap :scroll-container="scrollContainer" :messages="renderMessagesList"
                     @jump="jumpToQuestion" />
             </div>
         </div>
     </div>
-    <KnowledgeBaseEditorModal :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
+    <KnowledgeBaseEditorModal v-if="!pixlabProject" :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
         :kb-id="uiStore.currentKBId || undefined" :initial-type="uiStore.kbEditorType"
         @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
-    <ChatReferencesDrawer />
-    <ChatAttachmentPreviewDrawer />
-    <SandboxSidePanel v-if="!embeddedMode" :session-id="session_id"
+    <ChatReferencesDrawer :project-code="pixlabContext?.project_code" />
+    <ChatAttachmentPreviewDrawer v-if="!pixlabProject" />
+    <SandboxSidePanel v-if="!pixlabProject && !embeddedMode" :session-id="session_id"
         :agent-id="useSettingsStoreInstance.selectedAgentId"
         :agent-source-tenant-id="useSettingsStoreInstance.selectedAgentSourceTenantId"
         :shifted="referencesDrawerVisible"
@@ -196,7 +196,7 @@
 <script setup>
 import { makeSteerClientId } from '@/utils/steerId';
 import { storeToRefs } from 'pinia';
-import { ref, onMounted, onBeforeMount, onUnmounted, nextTick, watch, reactive, computed } from 'vue';
+import { ref, onMounted, onBeforeMount, onUnmounted, nextTick, watch, reactive, computed, inject } from 'vue';
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router';
 import InputField from '../../components/Input-field.vue';
 import botmsg from './components/botmsg.vue';
@@ -246,6 +246,10 @@ import SandboxSidePanel from '@/components/chat/SandboxSidePanel.vue';
 import BrowserTaskPreview from './components/BrowserTaskPreview.vue';
 import { collectSessionArtifacts, markSessionArtifactDeleted } from '@/utils/sessionArtifacts';
 import { isCollectingSkillArtifacts } from '@/utils/skillArtifacts';
+import { usePixLabChatSession } from '@/composables/usePixLabChatSession';
+import { takeProjectChatDraft } from '@/pixlab-workbench/chatDraft';
+import { PIXLAB_PROJECT_CONTEXT } from '@/pixlab-workbench/context';
+import { notifyPixLabSessionsChanged } from '@/pixlab-workbench/events';
 const referencesDrawer = provideChatReferencesDrawer();
 provideChatAttachmentPreviewDrawer();
 const sandboxPanel = provideChatSandboxPanel();
@@ -256,7 +260,11 @@ const props = defineProps({
     agentId: { type: String, default: '' },
     kbIds: { type: Array, default: () => [] },
     embeddedMode: { type: Boolean, default: false },
+    pixlabProject: { type: Boolean, default: false },
 });
+const pixlabProject = computed(() => props.pixlabProject);
+const pixlabContextRef = inject(PIXLAB_PROJECT_CONTEXT, ref(null));
+const pixlabContext = computed(() => pixlabContextRef.value);
 
 const usemenuStore = useMenuStore();
 const useSettingsStoreInstance = useSettingsStore();
@@ -651,6 +659,7 @@ const cancelSuggestedQuestionsFetch = () => {
 };
 
 const fetchSuggestedQuestionsIfNeeded = async () => {
+    if (props.pixlabProject) return;
     if (props.embeddedMode) return;
     // 初始历史尚未拉完时不能判断是否有消息，避免有历史的会话误请求推荐问法
     if (historyLoading.value || messagesList.length > 0) {
@@ -663,6 +672,7 @@ const fetchSuggestedQuestionsIfNeeded = async () => {
 };
 
 const fetchSuggestedQuestions = async () => {
+    if (props.pixlabProject) return;
     if (historyLoading.value || messagesList.length > 0) {
         return;
     }
@@ -755,6 +765,7 @@ const dismissSuggestions = (message, set) => {
 
 // 防抖包装，切换知识库/文件时300ms内不重复请求
 const debouncedFetchSuggestions = () => {
+    if (props.pixlabProject) return;
     if (historyLoading.value || messagesList.length > 0) return;
     if (suggestedDebounceTimer) clearTimeout(suggestedDebounceTimer);
     suggestedDebounceTimer = setTimeout(() => { fetchSuggestedQuestionsIfNeeded(); }, 300);
@@ -795,6 +806,7 @@ const getUserQuery = (index) => {
 };
 
 watch([() => route.params], async (newvalue) => {
+    if (props.pixlabProject) return;
     isFirstEnter.value = true;
     if (newvalue[0].chatid) {
         if (!firstQuery.value) {
@@ -1016,6 +1028,57 @@ const {
         void flushSteerAfterTurn(persistedAssistantId(message));
     },
 });
+
+const projectSessionId = computed(() => String(route.params.chatid || props.session_id || ''));
+const projectChat = usePixLabChatSession({
+    enabled: () => props.pixlabProject,
+    projectCode: String(pixlabContext.value?.project_code || route.params.projectCode || ''),
+    sessionId: projectSessionId,
+    knowledgeBaseId: String(pixlabContext.value?.knowledge_base.id || ''),
+    scrollContainer,
+    onSessionTitle: () => notifyPixLabSessionsChanged(),
+});
+
+const renderMessagesList = computed(() => props.pixlabProject ? projectChat.messagesList : messagesList);
+const renderHistoryLoading = computed(() => props.pixlabProject ? projectChat.historyLoading.value : historyLoading.value);
+const renderLoading = computed(() => props.pixlabProject ? projectChat.loading.value : loading.value);
+const renderIsReplying = computed(() => props.pixlabProject ? projectChat.isReplying.value : isReplying.value);
+const renderAssistantMessageId = computed(() => props.pixlabProject
+    ? projectChat.currentAssistantMessageId.value
+    : currentAssistantMessageId.value);
+const renderUserHasScrolledUp = computed(() => props.pixlabProject
+    ? projectChat.userHasScrolledUp.value
+    : userHasScrolledUp.value);
+const renderSessionId = computed(() => props.pixlabProject ? projectSessionId.value : String(session_id.value || ''));
+const renderShowGlobalTypingIndicator = computed(() => props.pixlabProject
+    ? projectChat.shouldShowGlobalTypingIndicator(projectChat.messagesList, projectChat.loading.value)
+    : showGlobalTypingIndicator.value);
+
+const renderShouldAssistantMessage = (message) => props.pixlabProject
+    ? projectChat.shouldRenderAssistantMessage(message)
+    : shouldRenderAssistantMessage(message);
+const renderGetUserQuery = (index) => props.pixlabProject
+    ? projectChat.getUserQuery(index)
+    : getUserQuery(index);
+const renderScrollToBottom = (force = false) => props.pixlabProject
+    ? projectChat.scrollToBottom(force)
+    : scrollToBottom(force);
+const renderHandleScroll = () => props.pixlabProject
+    ? projectChat.handleScroll()
+    : handleScroll();
+const renderOnClickScrollToBottom = () => props.pixlabProject
+    ? projectChat.onClickScrollToBottom()
+    : onClickScrollToBottom();
+const renderSendMsg = (query, modelId = '', mentionedItems = [], imageFiles = [], attachmentFiles = [], options = {}) => {
+    if (props.pixlabProject) {
+        void projectChat.sendMsg(query);
+        return;
+    }
+    void sendMsg(query, modelId, mentionedItems, imageFiles, attachmentFiles, options);
+};
+const renderStopGeneration = () => props.pixlabProject
+    ? void projectChat.handleStopGeneration()
+    : handleStopGeneration();
 
 const showGlobalTypingIndicator = computed(() =>
     shouldShowGlobalTypingIndicator(messagesList, loading.value, isImRecovering.value),
@@ -1665,6 +1728,7 @@ const handleSessionMutation = (event) => {
 };
 
 onBeforeMount(async () => {
+    if (props.pixlabProject) return;
     // 若从智能体列表点击共享智能体进入，URL 带 agent_id 与 source_tenant_id，同步到 store
     const agentIdFromQuery = props.agentId || (route.query.agent_id && String(route.query.agent_id));
     const sourceTenantIdFromQuery = route.query.source_tenant_id && String(route.query.source_tenant_id);
@@ -1683,6 +1747,15 @@ onBeforeMount(async () => {
 });
 
 onMounted(async () => {
+    if (props.pixlabProject) {
+        const draft = takeProjectChatDraft(projectSessionId.value);
+        if (draft) {
+            await nextTick();
+            await projectChat.sendMsg(draft);
+            notifyPixLabSessionsChanged();
+        }
+        return;
+    }
     window.addEventListener(SESSION_MUTATION_EVENT, handleSessionMutation);
     messagesList.splice(0);
     steerQueue.value = [];
@@ -1733,12 +1806,14 @@ onUnmounted(() => {
     if (recoverPollTimer) { clearTimeout(recoverPollTimer); recoverPollTimer = null; }
 });
 onBeforeRouteLeave((to, from, next) => {
+    if (props.pixlabProject) { next(); return; }
     clearData()
     // 离开聊天会话 → 还原"用户全局默认"，避免旧会话的请求态泄漏到新建对话。
     useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
     next()
 })
 onBeforeRouteUpdate((to, from, next) => {
+    if (props.pixlabProject) { next(); return; }
     clearData()
     // 仅"会话 → 会话"会落到这里；跨会话覆盖的还原放到 route.params 的 watch 里，
     // 因为新会话的 getSession 也在那边触发，便于保证 restore→snapshot→apply 顺序。

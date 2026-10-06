@@ -5,7 +5,7 @@
                 <span style="--wails-draggable: drag">{{ $t('createChat.title') }}</span>
             </div>
             <!-- 推荐问题 -->
-            <div ref="sqContainerRef" class="suggested-questions-container">
+            <div v-if="!pixlabProject" ref="sqContainerRef" class="suggested-questions-container">
                 <!-- 骨架屏占位 -->
                 <div v-if="sqLoading && suggestedQuestions.length === 0" class="suggested-questions-inner">
                     <div class="suggested-questions-title"><t-skeleton animation="gradient"
@@ -57,20 +57,21 @@
                     <button v-if="selectedProjectDir" type="button" class="project-dir-bar__clear"
                         :aria-label="$t('createChat.clearProject')" @click="clearProjectDir">×</button>
                 </div>
-                <InputField ref="inputFieldRef" @send-msg="sendMsg"></InputField>
+                <InputField ref="inputFieldRef" :auto-focus="pixlabProject" :compact="pixlabProject"
+                    :embedded-mode="pixlabProject" :is-replying="projectSubmitting" @send-msg="sendMsg"></InputField>
             </div>
         </div>
     </div>
 
-    <ContextualGuide tour="chat" :when="showChatContextualGuide" />
+    <ContextualGuide v-if="!pixlabProject" tour="chat" :when="showChatContextualGuide" />
 
     <!-- 知识库编辑器（创建/编辑统一组件） -->
-    <KnowledgeBaseEditorModal :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
+    <KnowledgeBaseEditorModal v-if="!pixlabProject" :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
         :kb-id="uiStore.currentKBId || undefined" :initial-type="uiStore.kbEditorType"
         @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
 </template>
 <script setup lang="ts">
-import { ref, watch, onMounted, nextTick, computed } from 'vue';
+import { ref, watch, onMounted, nextTick, computed, inject } from 'vue';
 import ContextualGuide from '@/components/ContextualGuide.vue';
 import InputField from '@/components/Input-field.vue';
 import { createSessions } from "@/api/chat/index";
@@ -88,12 +89,22 @@ import { MessagePlugin } from 'tdesign-vue-next';
 import { useI18n } from 'vue-i18n';
 import KnowledgeBaseEditorModal from '@/views/knowledge/KnowledgeBaseEditorModal.vue';
 import { useKnowledgeBaseCreationNavigation } from '@/hooks/useKnowledgeBaseCreationNavigation';
+import { createChatSession } from '@/pixlab-workbench/api';
+import { storeProjectChatDraft } from '@/pixlab-workbench/chatDraft';
+import { PIXLAB_PROJECT_CONTEXT } from '@/pixlab-workbench/context';
+import { notifyPixLabSessionsChanged } from '@/pixlab-workbench/events';
+
+const props = withDefaults(defineProps<{ pixlabProject?: boolean }>(), { pixlabProject: false });
+const pixlabProject = computed(() => props.pixlabProject);
+const pixlabContext = inject(PIXLAB_PROJECT_CONTEXT, ref(null));
+const projectSubmitting = ref(false);
 
 const router = useRouter();
 const route = useRoute();
 const usemenuStore = useMenuStore();
 const settingsStore = useSettingsStore();
 onBeforeRouteLeave((to) => {
+    if (props.pixlabProject) return;
     // The first send carries the draft into its new session; abandoning the
     // composer must not make this a default for the next conversation.
     if (!to.path.startsWith('/platform/chat/') || !usemenuStore.isFirstSession) {
@@ -106,7 +117,7 @@ const { t } = useI18n();
 const { navigateToKnowledgeBaseList } = useKnowledgeBaseCreationNavigation();
 
 const hostSandboxEnabled = computed(() =>
-    shouldRenderHostProjectSettings(deploymentCapabilities.isSupported('settings.sandbox.host')),
+    !pixlabProject.value && shouldRenderHostProjectSettings(deploymentCapabilities.isSupported('settings.sandbox.host')),
 );
 const selectedProjectDir = ref('');
 const pickingProjectDir = ref(false);
@@ -167,6 +178,7 @@ const onQuestionsEntered = () => {
 };
 
 const fetchSuggestedQuestions = async () => {
+    if (pixlabProject.value) return;
     const fetchId = ++suggestedQuestionsFetchId;
     sqLoading.value = true;
     try {
@@ -192,6 +204,7 @@ const fetchSuggestedQuestions = async () => {
 
 // 防抖包装，切换知识库/文件时300ms内不重复请求
 const debouncedFetch = () => {
+    if (pixlabProject.value) return;
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => { fetchSuggestedQuestions(); }, 300);
 };
@@ -211,6 +224,7 @@ watch(
 );
 
 onMounted(() => {
+    if (props.pixlabProject) return;
     fetchSuggestedQuestions();
 });
 
@@ -223,7 +237,31 @@ const handleSuggestedQuestionClick = (item: SuggestedQuestion) => {
 };
 
 const sendMsg = (value: string, modelId: string, mentionedItems: any[], imageFiles: any[] = [], attachmentFiles: any[] = [], options: SendMessageOptions = {}) => {
+    if (pixlabProject.value) {
+        void createProjectSession(value);
+        return;
+    }
     createNewSession(value, modelId, mentionedItems, imageFiles, attachmentFiles, options);
+}
+
+async function createProjectSession(value: string) {
+    const query = value.trim();
+    const context = pixlabContext.value;
+    if (!query || !context || projectSubmitting.value) return;
+    projectSubmitting.value = true;
+    try {
+        const session = await createChatSession(context.project_code);
+        storeProjectChatDraft(session.id, query);
+        notifyPixLabSessionsChanged();
+        await router.push({
+            name: 'pixlabProjectChat',
+            params: { projectCode: context.project_code, chatid: session.id },
+        });
+    } catch (cause) {
+        MessagePlugin.error(cause instanceof Error ? cause.message : t('createChat.messages.createError'));
+    } finally {
+        projectSubmitting.value = false;
+    }
 }
 
 async function createNewSession(value: string, modelId: string, mentionedItems: any[] = [], imageFiles: any[] = [], attachmentFiles: any[] = [], options: SendMessageOptions = {}) {

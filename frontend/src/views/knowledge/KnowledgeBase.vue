@@ -83,9 +83,19 @@ import {
 import { useI18n } from 'vue-i18n';
 import { useMarqueeSelect } from '@/hooks/useMarqueeSelect';
 import type { ParserEngineInfo } from '@/api/system';
+import { getKnowledgeBaseById } from '@/api/knowledge-base/index';
+import { getActiveProjectContext } from '@/pixlab-workbench/context';
+const props = withDefaults(defineProps<{
+  pixlabProject?: boolean;
+  knowledgeBaseId?: string;
+}>(), {
+  pixlabProject: false,
+  knowledgeBaseId: '',
+});
+const pixlabProject = computed(() => props.pixlabProject);
 const route = useRoute();
 const { t } = useI18n();
-const kbId = computed(() => (route.params as any).kbId as string || '');
+const kbId = computed(() => props.knowledgeBaseId || getActiveProjectContext()?.knowledge_base.id || (route.params as any).kbId as string || '');
 const kbInfo = ref<any>(null);
 const uploadSourceRef = ref<InstanceType<typeof KbUploadSourceDropdown> | null>(null);
 const kbLoading = ref(false);
@@ -124,7 +134,9 @@ const kbViewTabs = computed(() => {
       { key: 'graph', icon: 'relation', label: t(`${w}.tabGraph`), tip: indexing ? wikiIndexingTip.value : t(`${w}.tabGraphTip`), indexing },
     )
   }
-  tabs.push({ key: 'gallery', icon: 'image', label: t(`${w}.tabGallery`), tip: t(`${w}.tabGalleryTip`) })
+  if (!props.pixlabProject) {
+    tabs.push({ key: 'gallery', icon: 'image', label: t(`${w}.tabGallery`), tip: t(`${w}.tabGalleryTip`) })
+  }
   return tabs
 })
 const shownKbTab = computed<KbTab>(() =>
@@ -323,6 +335,7 @@ const effectiveKBPermission = computed(() => orgStore.getKBPermission(kbId.value
 // hasRole('contributor') is intentionally NOT here — being a Contributor
 // in a tenant does not by itself grant edit on someone else's KB.
 const canEdit = computed(() => {
+  if (props.pixlabProject) return false;
   const permission = effectiveKBPermission.value;
   if (permission) return permissionCanEditKB(permission);
   if (isViaShare.value) return orgStore.canEditKB(kbId.value, false);
@@ -335,6 +348,7 @@ const canEdit = computed(() => {
 // shared KBs only an 'admin' share grant qualifies — editor/viewer (and
 // even being the creator viewed via share) never grant delete/settings.
 const canManage = computed(() => {
+  if (props.pixlabProject) return false;
   const permission = effectiveKBPermission.value;
   if (permission) return permissionCanManageKB(permission);
   if (isViaShare.value) return orgStore.canManageKB(kbId.value, false);
@@ -354,6 +368,7 @@ const canManage = computed(() => {
 // the local tenant role is irrelevant — canEdit already encodes the share
 // grant, so trust it.
 const canMutateKnowledge = computed(() => {
+  if (props.pixlabProject) return false;
   if (!canEdit.value) return false;
   if (isViaShare.value) return true;
   if (isOwner.value) return true;
@@ -366,9 +381,14 @@ const canMutateKnowledge = computed(() => {
 // Viewer can never download; for cross-tenant KBs the effective share
 // permission must additionally be Editor or Admin.
 const canDownloadKnowledge = computed(() => {
+  if (props.pixlabProject) return false;
   if (!authStore.hasRole('contributor')) return false;
   const permission = effectiveKBPermission.value;
   return !permission || permission === 'owner' || permission === 'admin' || permission === 'editor';
+});
+const canUpload = computed(() => {
+  if (!props.pixlabProject) return canEdit.value;
+  return getActiveProjectContext()?.capabilities.includes('upload') ?? false;
 });
 
 const knowledgeList = ref<Array<{ id: string; name: string; type?: string }>>([]);
@@ -1058,7 +1078,9 @@ const loadKnowledgeBaseInfo = async (targetKbId: string, force = false) => {
   }
   kbLoading.value = true;
   try {
-    const data = await chatResources.fetchKnowledgeBaseById(targetKbId, force);
+    const data = props.pixlabProject
+      ? ((await getKnowledgeBaseById(targetKbId) as any)?.data)
+      : await chatResources.fetchKnowledgeBaseById(targetKbId, force);
     if (!isCurrentKb(targetKbId)) return;
 
     kbInfo.value = data;
@@ -1092,6 +1114,15 @@ const loadKnowledgeBaseInfo = async (targetKbId: string, force = false) => {
 
 const loadKnowledgeList = async () => {
   try {
+    if (props.pixlabProject) {
+      const project = getActiveProjectContext();
+      knowledgeList.value = project ? [{
+        id: project.knowledge_base.id,
+        name: project.knowledge_base.name,
+        type: 'document',
+      }] : [];
+      return;
+    }
     await chatResources.ensureKnowledgeBases();
     const myKbs = chatResources.rawKnowledgeBases.map((item: any) => ({
       id: String(item.id),
@@ -1323,7 +1354,7 @@ const handleOpenKnowledgeEvent = (e: Event) => {
 
 onMounted(() => {
   loadKnowledgeList();
-  editorResources.ensureParserEngines();
+  if (!props.pixlabProject) editorResources.ensureParserEngines();
 
   window.addEventListener('knowledgeFileUploaded', handleFileUploaded as EventListener);
   window.addEventListener('openURLImportDialog', handleOpenURLImportDialog as EventListener);
@@ -1632,6 +1663,7 @@ const ensureDocumentKbReady = () => {
     MessagePlugin.warning(t('knowledgeEditor.messages.missingId'));
     return false;
   }
+  if (props.pixlabProject) return canUpload.value;
   if (!kbInfo.value || !kbInfo.value.summary_model_id) {
     MessagePlugin.warning(t('knowledgeBase.notInitialized'));
     return false;
@@ -1772,6 +1804,10 @@ const openUploadConfirmDialog = async (files: File[], urls: string[] = []) => {
 const handleUploadSourceFiles = (files: File[]) => {
   if (!ensureDocumentKbReady()) return;
   if (files.length === 0) return;
+  if (props.pixlabProject) {
+    enqueueUploads(files, { targetFolder: selectedFolderPath.value });
+    return;
+  }
   openUploadConfirmDialog(files);
 };
 
@@ -1799,6 +1835,10 @@ const handleOpenKBSettings = () => {
 };
 
 const handleNavigateToKbList = () => {
+  if (props.pixlabProject) {
+    router.push({ name: 'pixlabProjectKnowledge', params: { projectCode: getActiveProjectContext()?.project_code } });
+    return;
+  }
   router.push('/platform/knowledge-bases');
 };
 
@@ -2303,7 +2343,7 @@ const handleKBEditorSuccess = (kbIdValue: string) => {
             </h2>
             <!-- 标题行右侧的动作锚点：聚拢"信息"和"设置"两个圆形按钮。 -->
             <div class="kb-title-actions">
-              <KBInfoPopover v-if="kbInfo && !authStore.isLiteMode" :kb-info="kbInfo"
+              <KBInfoPopover v-if="kbInfo && !authStore.isLiteMode && !pixlabProject" :kb-info="kbInfo"
                 :supported-file-types="[...supportedFileTypes]" />
               <t-tooltip v-if="canManage" :content="$t('knowledgeBase.settings')" placement="top">
                 <button type="button" class="kb-settings-button" :aria-label="$t('knowledgeBase.settings')" :disabled="!kbId" @click="handleOpenKBSettings">
@@ -2379,7 +2419,7 @@ const handleKBEditorSuccess = (kbIdValue: string) => {
                       <t-icon name="search" size="16px" />
                     </template>
                   </t-input>
-                  <t-popup v-model:visible="filtersExpanded" trigger="click" placement="bottom-right"
+                  <t-popup v-if="!pixlabProject" v-model:visible="filtersExpanded" trigger="click" placement="bottom-right"
                     overlay-class-name="document-filter-popup" :overlay-inner-style="{ padding: 0 }">
                     <button type="button" class="doc-filter-toggle" :class="{ active: filtersExpanded || activeFilterCount > 0 }"
                       :aria-expanded="filtersExpanded" aria-controls="document-filters">
@@ -2488,9 +2528,9 @@ const handleKBEditorSuccess = (kbIdValue: string) => {
                       </button>
                     </t-tooltip>
                   </div>
-                  <div v-if="canEdit" class="doc-filter-actions">
+                  <div v-if="canUpload" class="doc-filter-actions">
                     <KbUploadSourceDropdown ref="uploadSourceRef" :accept-file-types="acceptFileTypes"
-                      :supported-file-types="[...supportedFileTypes]" include-manual trigger-icon="add" :trigger-label="t('knowledgeBase.addDocument')"
+                      :supported-file-types="[...supportedFileTypes]" :include-manual="!pixlabProject" :include-url="!pixlabProject" trigger-icon="add" :trigger-label="t('knowledgeBase.addDocument')"
                       trigger-class="content-bar-icon-btn" data-guide="kb-detail-add-doc"
                       :tooltip="t('knowledgeBase.addDocument')" placement="bottom-right" @files="handleUploadSourceFiles"
                       @url="handleUploadSourceUrl" @manual="handleManualCreate" />
@@ -2621,14 +2661,14 @@ const handleKBEditorSuccess = (kbIdValue: string) => {
   </template>
 
   <!-- 知识库编辑器（创建/编辑统一组件） -->
-  <KnowledgeBaseEditorModal :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
+  <KnowledgeBaseEditorModal v-if="!pixlabProject" :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
     :kb-id="uiStore.currentKBId || undefined" :initial-type="uiStore.kbEditorType"
     @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
 
-  <ContextualGuide tour="kbDetail" :when="showKbDetailContextualGuide" />
+  <ContextualGuide v-if="!pixlabProject" tour="kbDetail" :when="showKbDetailContextualGuide" />
 
   <!-- 批量打标签弹窗 -->
-  <BatchTagDialog @tags-changed="onTagCatalogChanged" :visible="batchTagDialogVisible"
+  <BatchTagDialog v-if="!pixlabProject" @tags-changed="onTagCatalogChanged" :visible="batchTagDialogVisible"
     :count="selectedIds.size" :kb-id="kbId"
     :pre-selected-tag-ids="batchTagPreSelectedIds"
     :confirm-loading="batchTagging"

@@ -2,8 +2,35 @@ import { get, post, put, del, postUpload, getDown } from "../../utils/request";
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import type { AuditLog, AuditOutcome, ListAuditLogResponse } from '@/api/tenant/audit-log';
 import { buildListKnowledgeFilesQuery } from './knowledgeFileListQuery';
+import { getActiveProjectContext, isActiveProjectKnowledgeBase } from '@/pixlab-workbench/context';
+import {
+  getDocument,
+  getDocumentPreview,
+  getDocumentStages,
+  getDocumentStatuses,
+  getProjectChunk,
+  listDocumentChunks,
+  listDocuments,
+  listFolders,
+  reparseDocument,
+  uploadDocument,
+  type WorkbenchDocument,
+} from '@/pixlab-workbench/api';
 
 export { buildListKnowledgeFilesQuery } from './knowledgeFileListQuery';
+
+function mapWorkbenchDocument(document: WorkbenchDocument, knowledgeBaseId: string) {
+  return {
+    ...document,
+    knowledge_base_id: knowledgeBaseId,
+    original_file_name: document.file_name,
+    type: 'file',
+    source: 'upload',
+    channel: 'pixlab-workbench',
+    tags: [],
+    custom_metadata: {},
+  };
+}
 
 export type KnowledgeBaseActivity = AuditLog;
 
@@ -283,6 +310,28 @@ export function createKnowledgeBase(data: {
 }
 
 export function getKnowledgeBaseById(id: string, options?: { agent_id?: string; agent_source_tenant_id?: string }) {
+  const project = getActiveProjectContext();
+  if (project && isActiveProjectKnowledgeBase(id)) {
+    return Promise.resolve({
+      success: true,
+      data: {
+        id: project.knowledge_base.id,
+        name: project.knowledge_base.name,
+        description: project.project_name,
+        type: 'document',
+        my_permission: 'viewer',
+        summary_model_id: 'pixlab-bound',
+        embedding_model_id: 'pixlab-bound',
+        storage_backend_id: 'pixlab-bound',
+        indexing_strategy: {
+          vector_enabled: true,
+          keyword_enabled: true,
+          wiki_enabled: false,
+          graph_enabled: false,
+        },
+      },
+    });
+  }
   const query = new URLSearchParams();
   if (options?.agent_id) query.set('agent_id', options.agent_id);
   if (options?.agent_source_tenant_id) query.set('agent_source_tenant_id', options.agent_source_tenant_id);
@@ -414,6 +463,14 @@ export function uploadKnowledgeFile(
   onProgress?: (progressEvent: any) => void,
   config?: { signal?: AbortSignal },
 ) {
+  const project = getActiveProjectContext();
+  if (project && isActiveProjectKnowledgeBase(kbId)) {
+    onProgress?.({ loaded: 0, total: data.file.size, progress: 0 });
+    return uploadDocument(project.project_code, data.file, data.fileName || data.file.name).then((uploaded) => {
+      onProgress?.({ loaded: data.file.size, total: data.file.size, progress: 1 });
+      return { success: true, data: uploaded };
+    });
+  }
   const formData = new FormData();
   Object.keys(data).forEach(key => {
     const value = data[key];
@@ -477,6 +534,24 @@ export interface ListKnowledgeFilesParams {
 }
 
 export function listKnowledgeFiles(kbId: string, params: ListKnowledgeFilesParams) {
+  const project = getActiveProjectContext();
+  if (project && isActiveProjectKnowledgeBase(kbId)) {
+    return listDocuments(project.project_code, {
+      page: params.page,
+      size: params.page_size,
+      folder: params.folder_path,
+      query: params.keyword,
+      sortBy: params.sort_by,
+      sortOrder: params.sort_order,
+      parseStatus: params.parse_status,
+    }).then((page) => ({
+      success: true,
+      data: page.documents.map((document) => mapWorkbenchDocument(document, kbId)),
+      total: page.total,
+      page: page.page,
+      page_size: page.page_size,
+    }));
+  }
   return get(`/api/v1/knowledge-bases/${kbId}/knowledge?${buildListKnowledgeFilesQuery(params)}`);
 }
 
@@ -502,6 +577,10 @@ export interface KnowledgeFolderTree {
 }
 
 export function listKnowledgeFolders(kbId: string) {
+  const project = getActiveProjectContext();
+  if (project && isActiveProjectKnowledgeBase(kbId)) {
+    return listFolders(project.project_code).then((tree) => ({ success: true, data: tree }));
+  }
   return get(`/api/v1/knowledge-bases/${kbId}/knowledge/folders`);
 }
 
@@ -524,6 +603,13 @@ export function renameKnowledgeFolder(kbId: string, from: string, to: string) {
 }
 
 export function getKnowledgeDetails(id: string, options?: { agent_id?: string; agent_source_tenant_id?: string }) {
+  const project = getActiveProjectContext();
+  if (project) {
+    return getDocument(project.project_code, id).then((document) => ({
+      success: true,
+      data: mapWorkbenchDocument(document, project.knowledge_base.id),
+    }));
+  }
   const query = new URLSearchParams();
   if (options?.agent_id) query.set('agent_id', options.agent_id);
   if (options?.agent_source_tenant_id) query.set('agent_source_tenant_id', options.agent_source_tenant_id);
@@ -539,6 +625,10 @@ export function updateManualKnowledge(
 }
 
 export function reparseKnowledge(id: string, data?: { process_config?: KnowledgeProcessOverrides }) {
+  const project = getActiveProjectContext();
+  if (project) {
+    return reparseDocument(project.project_code, id).then((document) => ({ success: true, data: document }));
+  }
   return post(`/api/v1/knowledge/${id}/reparse`, data);
 }
 
@@ -547,6 +637,10 @@ export function cancelKnowledgeParse(id: string) {
 }
 
 export function getKnowledgeSpans(id: string, attempt?: number) {
+  const project = getActiveProjectContext();
+  if (project) {
+    return getDocumentStages(project.project_code, id).then((data) => ({ success: true, data }));
+  }
   const qs = attempt ? `?attempt=${attempt}` : '';
   return get(`/api/v1/knowledge/${id}/spans${qs}`);
 }
@@ -574,11 +668,22 @@ export function batchDownloadKnowledge(kbId: string, ids: string[], signal?: Abo
 }
 
 export function previewKnowledgeFile(id: string) {
+  const project = getActiveProjectContext();
+  if (project) return getDocumentPreview(project.project_code, id);
   return getDown(`/api/v1/knowledge/${id}/preview`);
 }
 
 /** @param idsQueryString - query string with ids (e.g. ids=xxx&ids=yyy) */
 export function batchQueryKnowledge(idsQueryString: string, kbId?: string, agentId?: string, agentSourceTenantId?: string) {
+  const project = getActiveProjectContext();
+  if (project && (!kbId || isActiveProjectKnowledgeBase(kbId))) {
+    const ids = new URLSearchParams(idsQueryString).getAll('ids');
+    return getDocumentStatuses(project.project_code, ids).then(({ documents }) => ({
+      success: true,
+      data: documents.map((document) => mapWorkbenchDocument(document, project.knowledge_base.id)),
+      total: documents.length,
+    }));
+  }
   let qs = idsQueryString;
   if (kbId) qs += `&kb_id=${encodeURIComponent(kbId)}`;
   if (agentId) qs += `&agent_id=${encodeURIComponent(agentId)}`;
@@ -589,6 +694,14 @@ export function batchQueryKnowledge(idsQueryString: string, kbId?: string, agent
 export const KNOWLEDGE_CHUNK_PAGE_SIZE = 25;
 
 export function getKnowledgeDetailsCon(id: string, page: number) {
+  const project = getActiveProjectContext();
+  if (project) {
+    return listDocumentChunks(project.project_code, id, page, KNOWLEDGE_CHUNK_PAGE_SIZE).then((result) => ({
+      success: true,
+      data: result.chunks,
+      total: result.total,
+    }));
+  }
   return get(`/api/v1/chunks/${id}?page=${page}&page_size=${KNOWLEDGE_CHUNK_PAGE_SIZE}`);
 }
 
@@ -627,6 +740,8 @@ export function regenerateKnowledgeSummary(knowledgeId: string) {
 
 // Get chunk by chunk_id only (new endpoint - to be added to backend)
 export function getChunkByIdOnly(chunkId: string) {
+  const project = getActiveProjectContext();
+  if (project) return getProjectChunk(project.project_code, chunkId).then((data) => ({ success: true, data }));
   return get(`/api/v1/chunks/by-id/${chunkId}`);
 }
 
@@ -650,6 +765,10 @@ export function listKnowledgeTags(
   kbId: string,
   params?: { page?: number; page_size?: number; keyword?: string },
 ) {
+  const project = getActiveProjectContext();
+  if (project && isActiveProjectKnowledgeBase(kbId)) {
+    return Promise.resolve({ success: true, data: [], total: 0, page: 1, page_size: 100 });
+  }
   const query = buildQuery(params);
   return get(`/api/v1/knowledge-bases/${kbId}/tags${query}`);
 }

@@ -13,7 +13,7 @@ type WorkbenchChatMessage = WorkbenchMessage & {
   isRagMode?: boolean
 }
 
-function mapMessage(message: WorkbenchMessage): WorkbenchChatMessage {
+function mapMessage(message: WorkbenchMessage, knowledgeBaseId: string): WorkbenchChatMessage {
   return {
     ...message,
     is_completed: message.completed,
@@ -25,8 +25,10 @@ function mapMessage(message: WorkbenchMessage): WorkbenchChatMessage {
       knowledge_id: citation.document_id,
       knowledge_title: citation.document_title,
       knowledge_filename: citation.document_file_name,
+      knowledge_base_id: knowledgeBaseId,
       content: citation.content,
       chunk_index: citation.chunk_index,
+      source_locators: citation.source_locators,
     })),
   }
 }
@@ -34,6 +36,9 @@ function mapMessage(message: WorkbenchMessage): WorkbenchChatMessage {
 export function usePixLabChatSession(options: {
   projectCode: string
   sessionId: Ref<string>
+  knowledgeBaseId: string
+  enabled?: () => boolean
+  scrollContainer?: Ref<HTMLElement | null>
   onMessagesChange?: (has: boolean) => void
   onSessionTitle?: (title: string) => void
   onTurnComplete?: (message: Record<string, unknown>) => void
@@ -48,7 +53,7 @@ export function usePixLabChatSession(options: {
   const isFirstEnter = ref(true)
   const currentAssistantMessageId = ref('')
   const fullContent = ref('')
-  const scrollContainer = ref<HTMLElement | null>(null)
+  const scrollContainer = options.scrollContainer ?? ref<HTMLElement | null>(null)
   const userHasScrolledUp = ref(false)
   let streamController: AbortController | undefined
 
@@ -97,6 +102,7 @@ export function usePixLabChatSession(options: {
   })
 
   async function loadMessages() {
+    if (options.enabled && !options.enabled()) return
     if (!options.sessionId.value) {
       messagesList.splice(0)
       historyLoading.value = false
@@ -105,7 +111,7 @@ export function usePixLabChatSession(options: {
     historyLoading.value = true
     try {
       const result = await listChatMessages(options.projectCode, options.sessionId.value)
-      messagesList.splice(0, messagesList.length, ...result.messages.map((message) => mapMessage(message) as unknown as Record<string, unknown>))
+      messagesList.splice(0, messagesList.length, ...result.messages.map((message) => mapMessage(message, options.knowledgeBaseId) as unknown as Record<string, unknown>))
       hasMoreHistory.value = false
       scrollToBottom(true)
     } catch {
@@ -116,6 +122,7 @@ export function usePixLabChatSession(options: {
   }
 
   async function sendMsg(value: string) {
+    if (options.enabled && !options.enabled()) return
     const query = value.trim()
     if (!query || !options.sessionId.value || isReplying.value) return
     prepareForNewOutgoingMessage()
@@ -161,6 +168,7 @@ export function usePixLabChatSession(options: {
   }
 
   async function handleStopGeneration() {
+    if (options.enabled && !options.enabled()) return
     streamController?.abort()
     markInFlightAssistantStopped(currentAssistantMessageId.value)
     if (options.sessionId.value && currentAssistantMessageId.value) {
@@ -171,7 +179,11 @@ export function usePixLabChatSession(options: {
   }
 
   watch(() => options.sessionId.value, () => void loadMessages(), { immediate: true })
-  onMounted(() => { loading.value = false; isReplying.value = false })
+  onMounted(() => {
+    if (options.enabled && !options.enabled()) return
+    loading.value = false
+    isReplying.value = false
+  })
   onUnmounted(() => streamController?.abort())
 
   return {
@@ -183,6 +195,7 @@ export function usePixLabChatSession(options: {
     hasMoreHistory,
     scrollContainer,
     userHasScrolledUp,
+    currentAssistantMessageId,
     shouldRenderAssistantMessage,
     shouldShowGlobalTypingIndicator,
     getUserQuery: (index: number) => String(messagesList[index - 1]?.content || ''),

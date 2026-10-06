@@ -1,0 +1,26 @@
+# Optional integration overlay for running WeKnora behind the PixLab gateway.
+# PixLab creates this external network; standalone WeKnora deployments do not
+# need this file.
+services:
+  frontend:
+    networks:
+      WeKnora-network:
+      pixlab-internal:
+        aliases:
+          - weknora-frontend
+
+  app:
+    environment:
+      # Both stacks expose a `postgres` network alias. Pin the application to
+      # WeKnora's uniquely named database container after joining PixLab's network.
+      DB_HOST: WeKnora-postgres
+    networks:
+      WeKnora-network:
+      pixlab-internal:
+        aliases:
+          - weknora-app
+
+networks:
+  pixlab-internal:
+    external: true
+    name: ${PIXLAB_DOCKER_NETWORK:-pixlab-internal}

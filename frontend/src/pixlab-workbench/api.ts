@@ -69,6 +69,19 @@ export interface WorkbenchCitation {
   source_locators?: unknown[]
 }
 
+export interface WorkbenchChunk {
+  id: string
+  knowledge_id: string
+  knowledge_base_id: string
+  content: string
+  chunk_index: number
+  chunk_type: string
+  parent_chunk_id?: string
+  content_revision?: number
+  source_locators?: unknown[]
+  image_info?: string
+}
+
 export interface WorkbenchMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -176,9 +189,27 @@ export function listFolders(projectCode: string) {
   return request<WorkbenchFolderTree>(projectPath(projectCode, '/folders'))
 }
 
-export function listDocuments(projectCode: string, folder = '') {
-  const query = new URLSearchParams({ page: '1', size: '100' })
-  if (folder) query.set('folder', folder)
+export function listDocuments(
+  projectCode: string,
+  options: {
+    page?: number
+    size?: number
+    folder?: string
+    query?: string
+    sortBy?: string
+    sortOrder?: string
+    parseStatus?: string
+  } = {},
+) {
+  const query = new URLSearchParams({
+    page: String(options.page || 1),
+    size: String(options.size || 100),
+  })
+  if (options.folder) query.set('folder', options.folder)
+  if (options.query) query.set('query', options.query)
+  if (options.sortBy) query.set('sort_by', options.sortBy)
+  if (options.sortOrder) query.set('sort_order', options.sortOrder)
+  if (options.parseStatus) query.set('status', options.parseStatus)
   return request<DocumentPage>(projectPath(projectCode, `/documents?${query}`))
 }
 
@@ -215,9 +246,51 @@ export function getDocumentStages(projectCode: string, documentId: string) {
   )
 }
 
-export function listChatSessions(projectCode: string) {
+export function getDocumentStatuses(projectCode: string, documentIds: string[]) {
+  return request<{ documents: WorkbenchDocument[] }>(projectPath(projectCode, '/documents/status'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: documentIds }),
+  })
+}
+
+export async function getDocumentPreview(projectCode: string, documentId: string) {
+  const response = await fetch(documentPreviewUrl(projectCode, documentId), {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) throw await responseError(response)
+  return response.blob()
+}
+
+export function getDocumentChunk(
+  projectCode: string,
+  documentId: string,
+  chunkId: string,
+) {
+  return request<WorkbenchChunk>(projectPath(
+    projectCode,
+    `/documents/${encodeURIComponent(documentId)}/chunks/${encodeURIComponent(chunkId)}`,
+  ))
+}
+
+export function getProjectChunk(projectCode: string, chunkId: string) {
+  return request<WorkbenchChunk>(
+    projectPath(projectCode, `/chunks/${encodeURIComponent(chunkId)}`),
+  )
+}
+
+export function listDocumentChunks(projectCode: string, documentId: string, page = 1, size = 25) {
+  return request<{ chunks: WorkbenchChunk[]; total: number; page: number; page_size: number }>(
+    projectPath(
+      projectCode,
+      `/documents/${encodeURIComponent(documentId)}/chunks?page=${page}&size=${size}`,
+    ),
+  )
+}
+
+export function listChatSessions(projectCode: string, page = 1, size = 100) {
   return request<{ sessions: WorkbenchSession[]; total: number; page: number; page_size: number }>(
-    projectPath(projectCode, '/sessions?page=1&size=100'),
+    projectPath(projectCode, `/sessions?page=${page}&size=${size}`),
   )
 }
 
@@ -236,9 +309,17 @@ export function deleteChatSession(projectCode: string, sessionId: string) {
   )
 }
 
-export function listChatMessages(projectCode: string, sessionId: string) {
+export function getChatSession(projectCode: string, sessionId: string) {
+  return request<WorkbenchSession>(
+    projectPath(projectCode, `/sessions/${encodeURIComponent(sessionId)}`),
+  )
+}
+
+export function listChatMessages(projectCode: string, sessionId: string, limit = 100, before = '') {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (before) query.set('before_time', before)
   return request<{ messages: WorkbenchMessage[] }>(
-    projectPath(projectCode, `/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`),
+    projectPath(projectCode, `/sessions/${encodeURIComponent(sessionId)}/messages?${query}`),
   )
 }
 

@@ -160,6 +160,43 @@ type handlerMessageService struct {
 	calls    int
 }
 
+type handlerChunkService struct {
+	interfaces.ChunkService
+	chunks    map[string]*types.Chunk
+	list      []*types.Chunk
+	getCalls  int
+	listCalls int
+}
+
+func (s *handlerChunkService) GetChunkByID(_ context.Context, id string) (*types.Chunk, error) {
+	s.getCalls++
+	chunk := s.chunks[id]
+	if chunk == nil {
+		return nil, errors.New("chunk not found")
+	}
+	copy := *chunk
+	return &copy, nil
+}
+
+func (s *handlerChunkService) ListPagedChunksByKnowledgeID(
+	_ context.Context,
+	_ string,
+	page *types.Pagination,
+	_ []types.ChunkType,
+) (*types.PageResult, error) {
+	s.listCalls++
+	rows := make([]*types.Chunk, 0, len(s.list))
+	for _, chunk := range s.list {
+		if chunk == nil {
+			rows = append(rows, nil)
+			continue
+		}
+		copy := *chunk
+		rows = append(rows, &copy)
+	}
+	return types.NewPageResult(int64(len(rows)), page, rows), nil
+}
+
 func (s *handlerMessageService) GetRecentMessagesBySession(
 	_ context.Context, sessionID string, _ int,
 ) ([]*types.Message, error) {
@@ -348,6 +385,115 @@ func TestPixLabWorkbenchDocumentStagesHideDocumentsFromOtherKnowledgeBases(t *te
 	require.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
 	require.Contains(t, response.Body.String(), "DOCUMENT_NOT_FOUND")
 	require.NotContains(t, response.Body.String(), "secret.md")
+}
+
+func TestPixLabWorkbenchProjectChunkReturnsSafeView(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	chunks := &handlerChunkService{chunks: map[string]*types.Chunk{
+		"chunk-p": {
+			ID: "chunk-p", TenantID: 10000, KnowledgeID: "doc-p", KnowledgeBaseID: "kb-p",
+			Content: "project content", ContentRevision: 4, ChunkIndex: 2,
+			ChunkType: types.ChunkTypeText, ParentChunkID: "parent-p",
+			LastEditorID: "internal-editor", Metadata: types.JSON(`{"private":"value"}`),
+		},
+	}}
+	fixture.handler.chunks = chunks
+	router := gin.New()
+	router.GET("/api/v1/pixlab-workbench/projects/:project_code/chunks/:chunk_id", fixture.handler.AuthenticateProject(), fixture.handler.GetProjectChunk)
+
+	request := authenticatedWorkbenchRequest(t, fixture, http.MethodGet, "/api/v1/pixlab-workbench/projects/PROJECT_P/chunks/chunk-p", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), `"id":"chunk-p"`)
+	require.Contains(t, response.Body.String(), `"knowledge_base_id":"kb-p"`)
+	require.Contains(t, response.Body.String(), `"content":"project content"`)
+	require.NotContains(t, response.Body.String(), "tenant_id")
+	require.NotContains(t, response.Body.String(), "last_editor_id")
+	require.NotContains(t, response.Body.String(), "metadata")
+	require.NotContains(t, response.Body.String(), "internal-editor")
+	require.NotContains(t, response.Body.String(), "private")
+	require.Equal(t, 1, chunks.getCalls)
+}
+
+func TestPixLabWorkbenchProjectChunkHidesOtherKnowledgeBase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	chunks := &handlerChunkService{chunks: map[string]*types.Chunk{
+		"chunk-q": {ID: "chunk-q", TenantID: 10000, KnowledgeID: "doc-q", KnowledgeBaseID: "kb-q", Content: "secret"},
+	}}
+	fixture.handler.chunks = chunks
+	router := gin.New()
+	router.GET("/api/v1/pixlab-workbench/projects/:project_code/chunks/:chunk_id", fixture.handler.AuthenticateProject(), fixture.handler.GetProjectChunk)
+
+	request := authenticatedWorkbenchRequest(t, fixture, http.MethodGet, "/api/v1/pixlab-workbench/projects/PROJECT_P/chunks/chunk-q", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), "CHUNK_NOT_FOUND")
+	require.NotContains(t, response.Body.String(), "secret")
+	require.NotContains(t, response.Body.String(), "kb-q")
+}
+
+func TestPixLabWorkbenchDocumentChunkRequiresMatchingDocument(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	chunks := &handlerChunkService{chunks: map[string]*types.Chunk{
+		"chunk-p": {ID: "chunk-p", KnowledgeID: "doc-p", KnowledgeBaseID: "kb-p", Content: "project content"},
+	}}
+	fixture.handler.chunks = chunks
+	router := gin.New()
+	router.GET("/api/v1/pixlab-workbench/projects/:project_code/documents/:document_id/chunks/:chunk_id", fixture.handler.AuthenticateProject(), fixture.handler.GetDocumentChunk)
+
+	request := authenticatedWorkbenchRequest(t, fixture, http.MethodGet, "/api/v1/pixlab-workbench/projects/PROJECT_P/documents/doc-other/chunks/chunk-p", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), "CHUNK_NOT_FOUND")
+	require.NotContains(t, response.Body.String(), "project content")
+}
+
+func TestPixLabWorkbenchDocumentChunkListRejectsOtherKnowledgeBaseBeforeChunkQuery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	fixture.knowledge.documents = map[string]*types.Knowledge{
+		"doc-q": {ID: "doc-q", KnowledgeBaseID: "kb-q", FileName: "secret.md"},
+	}
+	chunks := &handlerChunkService{list: []*types.Chunk{{ID: "chunk-q", KnowledgeID: "doc-q", KnowledgeBaseID: "kb-q"}}}
+	fixture.handler.chunks = chunks
+	router := gin.New()
+	router.GET("/api/v1/pixlab-workbench/projects/:project_code/documents/:document_id/chunks", fixture.handler.AuthenticateProject(), fixture.handler.ListDocumentChunks)
+
+	request := authenticatedWorkbenchRequest(t, fixture, http.MethodGet, "/api/v1/pixlab-workbench/projects/PROJECT_P/documents/doc-q/chunks", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), "DOCUMENT_NOT_FOUND")
+	require.Zero(t, chunks.listCalls, "chunk storage must not be queried for an out-of-scope document")
+	require.NotContains(t, response.Body.String(), "secret.md")
+}
+
+func TestPixLabWorkbenchDocumentListRejectsInvalidSortValues(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, query := range []string{"sort_by=tenant_id", "sort_order=sideways"} {
+		t.Run(query, func(t *testing.T) {
+			fixture := newWorkbenchHandlerFixture(t)
+			router := gin.New()
+			router.GET("/api/v1/pixlab-workbench/projects/:project_code/documents", fixture.handler.AuthenticateProject(), fixture.handler.ListDocuments)
+
+			request := authenticatedWorkbenchRequest(t, fixture, http.MethodGet, "/api/v1/pixlab-workbench/projects/PROJECT_P/documents?"+query, nil)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+			require.Contains(t, response.Body.String(), "INVALID_REQUEST")
+		})
+	}
 }
 
 func authenticatedWorkbenchRequest(

@@ -1,6 +1,6 @@
 <template>
-    <div class="main" ref="dropzone" :style="{ '--sidebar-width': `${uiStore.sidebarDisplayWidth}px` }">
-        <Menu></Menu>
+    <div class="main" :class="{ 'is-pixlab-project': pixlabProject }" ref="dropzone" :style="{ '--sidebar-width': `${uiStore.sidebarDisplayWidth}px` }">
+        <Menu :pixlab-project="pixlabProject"></Menu>
         <div v-if="isRouterAlive" class="platform-route-outlet">
             <RouterView />
         </div>
@@ -8,21 +8,21 @@
             <UploadMask></UploadMask>
         </div>
         <!-- 全局设置模态框，供所有 platform 子路由使用 -->
-        <Settings />
+        <Settings v-if="!pixlabProject" />
         <!-- 全局命令面板 (⌘K)，随 platform 路由存活 -->
-        <GlobalCommandPalette />
+        <GlobalCommandPalette v-if="!pixlabProject" />
         <!-- 全局右上角"待处理邀请"铃铛。固定定位，z-index 低于抽屉，业务页面
              右侧抽屉弹出时会自然覆盖；仅在有待处理邀请时渲染。 -->
-        <GlobalInvitationBell />
+        <GlobalInvitationBell v-if="!pixlabProject" />
         <!-- 知识库文件上传进度浮层：上传队列放在 store 里，切换页面不中断 -->
         <UploadTasksPanel />
         <!-- 带遮罩层的新手引导：首次进入自动开启，可从用户菜单顶部昵称旁帮助按钮重新打开 -->
-        <NewUserGuide />
+        <NewUserGuide v-if="!pixlabProject" />
     </div>
 </template>
 <script setup lang="ts">
 import Menu from '@/components/menu.vue'
-import { ref, onMounted, onUnmounted, nextTick, provide, watch } from 'vue';
+import { computed, inject, ref, onMounted, onUnmounted, nextTick, provide, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router'
 import UploadMask from '@/components/upload-mask.vue'
 import Settings from '@/views/settings/Settings.vue'
@@ -37,6 +37,13 @@ import { getKnowledgeBaseById } from '@/api/knowledge-base/index'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import { collectDroppedFiles } from './collectDroppedFiles'
+import { PIXLAB_PROJECT_CONTEXT } from '@/pixlab-workbench/context'
+
+const props = withDefaults(defineProps<{ pixlabProject?: boolean }>(), {
+    pixlabProject: false,
+})
+const pixlabProject = computed(() => props.pixlabProject)
+const pixlabContext = inject(PIXLAB_PROJECT_CONTEXT, null)
 
 const route = useRoute();
 const router = useRouter();
@@ -74,10 +81,11 @@ let dragCounter = 0;
 
 // 获取当前知识库ID
 const getCurrentKbId = (): string | null => {
+    if (pixlabProject.value) return pixlabContext?.value?.knowledge_base.id || null
     return (route.params as any)?.kbId as string || null
 }
 
-const CHAT_DROP_ROUTE_NAMES = new Set(['chat', 'globalCreatChat', 'kbCreatChat']);
+const CHAT_DROP_ROUTE_NAMES = new Set(['chat', 'globalCreatChat', 'kbCreatChat', 'pixlabProjectChat', 'pixlabProjectNewChat']);
 
 const isChatDropRoute = () => {
     return CHAT_DROP_ROUTE_NAMES.has(String(route.name || ''));
@@ -85,6 +93,7 @@ const isChatDropRoute = () => {
 
 // 检查知识库初始化状态
 const checkKnowledgeBaseInitialization = async (): Promise<boolean> => {
+    if (pixlabProject.value) return true
     const currentKbId = getCurrentKbId();
     
     if (!currentKbId) {
@@ -211,7 +220,7 @@ onMounted(() => {
     // /platform/knowledge-search?q=foo 重定向后携带 ?cmdk=foo
     maybeOpenCmdkFromRoute()
     // 后台预取对话输入栏资源，进入 creatChat / chat 时复用缓存
-    void useChatResourcesStore().prefetchChatInput()
+    if (!pixlabProject.value) void useChatResourcesStore().prefetchChatInput()
 });
 
 // 监听路由变化，兼容 SPA 内部跳转时的 ?cmdk= 参数
@@ -256,6 +265,10 @@ onUnmounted(() => {
     min-height: 0;
     /* 统一整页背景，让左侧菜单与右侧内容区视觉连贯 */
     background: var(--td-bg-color-container);
+}
+
+.main.is-pixlab-project {
+    min-width: 0;
 }
 
 /* 右侧路由区：占满剩余宽度与整列高度，并把 min-height:0 传给子页面以便内部 flex 滚动 */

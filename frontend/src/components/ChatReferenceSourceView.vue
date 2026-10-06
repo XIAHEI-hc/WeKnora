@@ -36,6 +36,7 @@
       v-else-if="mode === 'file'"
       class="reference-source__preview"
       :knowledge-id="target.knowledgeId"
+      :source-blob="projectCode ? sourceBlob : undefined"
       :file-type="meta.fileType"
       :file-name="meta.fileName"
       :active="active"
@@ -66,6 +67,7 @@ import { useRouter } from 'vue-router'
 import DocumentPreview from '@/components/document-preview.vue'
 import ArtifactFileIcon from '@/views/chat/components/ArtifactFileIcon.vue'
 import { getChunkByIdOnly, getKnowledgeDetails } from '@/api/knowledge-base/index'
+import { getDocument, getDocumentPreview, getProjectChunk } from '@/pixlab-workbench/api'
 import { isKnownPreviewableFile } from '@/utils/filePreview'
 import type { ReferenceSourceTarget } from '@/utils/referenceSources'
 import {
@@ -84,6 +86,7 @@ import {
 const props = defineProps<{
   target: ReferenceSourceTarget
   active: boolean
+  projectCode?: string
 }>()
 
 const emit = defineEmits<{
@@ -109,6 +112,7 @@ const sourceHash = ref('')
 const edited = ref(false)
 const imageDigest = ref<string>()
 const imageContext = ref<SourceLocateRequest['imageContext']>()
+const sourceBlob = ref<Blob>()
 let locateToken = 0
 const meta = reactive({ fileName: '', fileType: '', knowledgeSource: '', knowledgeType: '', title: '' })
 let loadVersion = 0
@@ -120,6 +124,13 @@ const displayTitle = computed(() => props.target.title || meta.title || displayN
 
 const documentHref = computed(() => {
   if (!props.target.knowledgeBaseId) return ''
+  if (props.projectCode) {
+    return router.resolve({
+      name: 'pixlabProjectKnowledge',
+      params: { projectCode: props.projectCode },
+      query: { knowledge_id: props.target.knowledgeId },
+    }).href
+  }
   return router.resolve({
     path: `/platform/knowledge-bases/${props.target.knowledgeBaseId}`,
     query: { knowledge_id: props.target.knowledgeId },
@@ -166,7 +177,9 @@ async function loadMeta(version: number) {
   meta.title = props.target.title || ''
   sourceHash.value = ''
   try {
-    const res: any = await getKnowledgeDetails(props.target.knowledgeId)
+    const res: any = props.projectCode
+      ? { data: await getDocument(props.projectCode, props.target.knowledgeId) }
+      : await getKnowledgeDetails(props.target.knowledgeId)
     if (version !== loadVersion) return
     const data = res?.data || {}
     sourceHash.value = data.file_hash || ''
@@ -192,7 +205,9 @@ async function loadChunk(version: number) {
   // Old conversations and agent tool results carry no locators; the chunk
   // itself has them (and its own, unexpanded text for matching).
   try {
-    const res: any = await getChunkByIdOnly(props.target.chunkId)
+    const res: any = props.projectCode
+      ? { data: await getProjectChunk(props.projectCode, props.target.chunkId) }
+      : await getChunkByIdOnly(props.target.chunkId)
     if (version !== loadVersion) return
     // The current chunk overrides snapshots embedded in historical answers.
     // In particular, an edit must invalidate even previously cached locators.
@@ -234,7 +249,9 @@ async function loadChunk(version: number) {
     // for a merely similar answer or silently select a neighbouring chunk.
     if (!edited.value && chunk?.chunk_type === 'text' && chunk.parent_chunk_id &&
         !quotedSourceExcerpt(chunkContent.value, props.target.anchorText || '')) {
-      const parent: any = await getChunkByIdOnly(chunk.parent_chunk_id)
+      const parent: any = props.projectCode
+        ? { data: await getProjectChunk(props.projectCode, chunk.parent_chunk_id) }
+        : await getChunkByIdOnly(chunk.parent_chunk_id)
       if (version !== loadVersion) return
       const p = parent?.data
       if (p?.knowledge_id === props.target.knowledgeId && p.chunk_type === 'parent_text' && !p.content_revision &&
@@ -247,7 +264,9 @@ async function loadChunk(version: number) {
       }
     }
     if (!edited.value && chunk?.chunk_type?.startsWith('image_') && chunk.parent_chunk_id) {
-      const parent: any = await getChunkByIdOnly(chunk.parent_chunk_id)
+      const parent: any = props.projectCode
+        ? { data: await getProjectChunk(props.projectCode, chunk.parent_chunk_id) }
+        : await getChunkByIdOnly(chunk.parent_chunk_id)
       if (version !== loadVersion) return
       if (parent?.data?.knowledge_id === props.target.knowledgeId && !parent.data.content_revision) {
         let info = chunk.image_info
@@ -292,6 +311,15 @@ async function load() {
   if (version !== loadVersion) return
   shownKnowledgeId = props.target.knowledgeId
   const next = resolveMode()
+  if (next === 'file' && props.projectCode && !sameFile) {
+    try {
+      sourceBlob.value = await getDocumentPreview(props.projectCode, props.target.knowledgeId)
+    } catch {
+      sourceBlob.value = undefined
+      emit('unavailable')
+      return
+    }
+  }
   mode.value = next
   if (next === 'none') {
     emit('unavailable')

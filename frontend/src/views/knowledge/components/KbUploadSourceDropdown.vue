@@ -76,6 +76,7 @@ const props = withDefaults(defineProps<{
   acceptFileTypes?: string
   supportedFileTypes?: string[]
   includeManual?: boolean
+  includeUrl?: boolean
   triggerIcon?: string
   triggerLabel?: string
   triggerClass?: string
@@ -86,6 +87,7 @@ const props = withDefaults(defineProps<{
   acceptFileTypes: '',
   supportedFileTypes: () => [],
   includeManual: false,
+  includeUrl: true,
   triggerIcon: 'file-add',
   triggerClass: '',
   dataGuide: '',
@@ -128,12 +130,14 @@ const dropdownOptions = computed(() => {
       value: 'uploadFolder',
       prefixIcon: () => h(FolderAddIcon, sourceIconProps),
     },
-    {
+  ]
+  if (props.includeUrl) {
+    options.push({
       content: t('knowledgeBase.importURL'),
       value: 'importURL',
       prefixIcon: () => h(LinkIcon, sourceIconProps),
-    },
-  ]
+    })
+  }
   if (props.includeManual) {
     options.push({
       content: t('upload.onlineEdit'),

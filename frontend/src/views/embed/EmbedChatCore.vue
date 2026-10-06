@@ -263,6 +263,7 @@ const chatSession = props.workbenchProjectCode
   ? usePixLabChatSession({
     projectCode: props.workbenchProjectCode,
     sessionId: sessionIdRef,
+    knowledgeBaseId: props.kbIds[0] || '',
     onMessagesChange: (has) => emit('messages-state', has),
     onSessionTitle: (title) => {
       if (props.useSessionHeaderTitle) emit('session-title', title)

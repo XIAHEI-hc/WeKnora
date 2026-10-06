@@ -6,6 +6,21 @@ export interface PixLabBootstrapMessage {
   project_code: string
 }
 
+export function isBootstrapMessageForProject(
+  value: unknown,
+  projectCode: string,
+  nonce: string,
+): value is PixLabBootstrapMessage {
+  if (!value || typeof value !== 'object') return false
+  const message = value as Partial<PixLabBootstrapMessage>
+  return message.type === 'pixlab.bootstrap' &&
+    message.version === 1 &&
+    message.nonce === nonce &&
+    message.project_code === projectCode &&
+    typeof message.ticket === 'string' &&
+    message.ticket.length > 0
+}
+
 export function createBootstrapBridge(
   projectCode: string,
   onBootstrap: (message: PixLabBootstrapMessage) => void,
@@ -15,10 +30,8 @@ export function createBootstrapBridge(
 
   const receive = (event: MessageEvent) => {
     if (event.origin !== targetOrigin || event.source !== window.parent) return
-    const message = event.data as Partial<PixLabBootstrapMessage> | null
-    if (!message || message.type !== 'pixlab.bootstrap' || message.version !== 1) return
-    if (message.nonce !== nonce || message.project_code !== projectCode || !message.ticket) return
-    onBootstrap(message as PixLabBootstrapMessage)
+    if (!isBootstrapMessageForProject(event.data, projectCode, nonce)) return
+    onBootstrap(event.data)
   }
 
   window.addEventListener('message', receive)

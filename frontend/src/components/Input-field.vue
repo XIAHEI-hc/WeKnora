@@ -540,6 +540,10 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  externalStop: {
+    type: Boolean,
+    default: false
+  },
   queuedSteers: {
     type: Array as PropType<SteerQueueItem[]>,
     default: () => []
@@ -2650,6 +2654,8 @@ const handleStop = async () => {
 
   emit('stop-generation');
 
+  if (props.externalStop) return;
+
   try {
     await stopSession(props.sessionId, props.assistantMessageId);
     emit('stop-confirmed');
@@ -2725,7 +2731,7 @@ defineExpose({
       </div>
 
       <!-- 附件列表区域 (由 AttachmentUpload 组件渲染) -->
-      <AttachmentUpload ref="attachmentUploadRef" :max-files="5"
+      <AttachmentUpload v-if="!embeddedMode" ref="attachmentUploadRef" :max-files="5"
         :session-id="sessionId" :agent-id="selectedAgentId"
         :agent-source-tenant-id="settingsStore.selectedAgentSourceTenantId ?? undefined"
         @update:files="uploadedAttachments = $event" />

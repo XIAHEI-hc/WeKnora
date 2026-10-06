@@ -36,6 +36,7 @@ type PixLabWorkbenchHandler struct {
 	service        *appservice.PixLabWorkbenchService
 	sessions       interfaces.SessionService
 	messages       interfaces.MessageService
+	chunks         interfaces.ChunkService
 	sessionHandler *sessionhandler.Handler
 	spanRepo       repository.KnowledgeSpanRepository
 }
@@ -50,11 +51,12 @@ func NewPixLabWorkbenchHandlerWithDependencies(
 	service *appservice.PixLabWorkbenchService,
 	sessions interfaces.SessionService,
 	messages interfaces.MessageService,
+	chunks interfaces.ChunkService,
 	sessionHandler *sessionhandler.Handler,
 	spanRepo repository.KnowledgeSpanRepository,
 ) *PixLabWorkbenchHandler {
 	return &PixLabWorkbenchHandler{
-		service: service, sessions: sessions, messages: messages,
+		service: service, sessions: sessions, messages: messages, chunks: chunks,
 		sessionHandler: sessionHandler, spanRepo: spanRepo,
 	}
 }
@@ -191,9 +193,28 @@ func (h *PixLabWorkbenchHandler) ListDocuments(c *gin.Context) {
 	size := parseBoundedInt(c.Query("size"), 20, 1, 100)
 	pagination := &types.Pagination{Page: page, PageSize: size}
 	filter := types.KnowledgeListFilter{}
-	if rawFolder, exists := c.GetQuery("folder"); exists {
+	if rawFolder, exists := c.GetQuery("folder_path"); exists {
 		filter.FolderPath = types.NormalizeKnowledgeFolderPath(rawFolder)
 		filter.FolderScope = types.FolderScopeExact
+	} else if rawFolder, exists := c.GetQuery("folder"); exists {
+		filter.FolderPath = types.NormalizeKnowledgeFolderPath(rawFolder)
+		filter.FolderScope = types.FolderScopeExact
+	}
+	filter.Keyword = strings.TrimSpace(c.Query("query"))
+	filter.ParseStatus = strings.TrimSpace(c.Query("status"))
+	if rawSortBy := strings.TrimSpace(c.Query("sort_by")); rawSortBy != "" {
+		filter.SortBy = types.KnowledgeListSortField(rawSortBy)
+		if !filter.SortBy.Valid() {
+			h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "sort_by is invalid", nil))
+			return
+		}
+	}
+	if rawSortOrder := strings.TrimSpace(c.Query("sort_order")); rawSortOrder != "" {
+		filter.SortOrder = types.KnowledgeListSortOrder(rawSortOrder)
+		if !filter.SortOrder.Valid() {
+			h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "sort_order is invalid", nil))
+			return
+		}
 	}
 	result, err := h.service.KnowledgeService().ListPagedKnowledgeByKnowledgeBaseID(
 		c.Request.Context(), binding.KnowledgeBaseID, pagination, filter,
@@ -451,6 +472,100 @@ func (h *PixLabWorkbenchHandler) ReparseDocument(c *gin.Context) {
 		return
 	}
 	h.success(c, http.StatusAccepted, gin.H{"id": document.ID, "parse_status": document.ParseStatus})
+}
+
+type pixLabChunkView struct {
+	ID              string               `json:"id"`
+	KnowledgeID     string               `json:"knowledge_id"`
+	KnowledgeBaseID string               `json:"knowledge_base_id"`
+	Content         string               `json:"content"`
+	ChunkIndex      int                  `json:"chunk_index"`
+	ChunkType       types.ChunkType      `json:"chunk_type"`
+	ParentChunkID   string               `json:"parent_chunk_id,omitempty"`
+	ContentRevision int                  `json:"content_revision"`
+	SourceLocators  types.SourceLocators `json:"source_locators,omitempty"`
+	ImageInfo       string               `json:"image_info,omitempty"`
+}
+
+func newPixLabChunkView(chunk *types.Chunk) pixLabChunkView {
+	return pixLabChunkView{
+		ID: chunk.ID, KnowledgeID: chunk.KnowledgeID, KnowledgeBaseID: chunk.KnowledgeBaseID,
+		Content: chunk.Content, ChunkIndex: chunk.ChunkIndex, ChunkType: chunk.ChunkType,
+		ParentChunkID: chunk.ParentChunkID, ContentRevision: chunk.ContentRevision,
+		SourceLocators: chunk.SourceLocators, ImageInfo: chunk.ImageInfo,
+	}
+}
+
+func (h *PixLabWorkbenchHandler) ListDocumentChunks(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok || !h.requireChunkService(c) {
+		return
+	}
+	documentID := c.Param("document_id")
+	document, err := h.service.KnowledgeService().GetKnowledgeByID(c.Request.Context(), documentID)
+	if err != nil || document == nil || document.KnowledgeBaseID != binding.KnowledgeBaseID {
+		h.fail(c, appserviceError(http.StatusNotFound, "DOCUMENT_NOT_FOUND", "Document was not found", err))
+		return
+	}
+	pagination := &types.Pagination{
+		Page:     parseBoundedInt(c.Query("page"), 1, 1, 1_000_000),
+		PageSize: parseBoundedInt(c.Query("size"), 25, 1, 100),
+	}
+	chunkTypes := []types.ChunkType{
+		types.ChunkTypeText, types.ChunkTypeParentText, types.ChunkTypeImageOCR,
+		types.ChunkTypeImageCaption, types.ChunkTypeSummary, types.ChunkTypeTableSummary,
+		types.ChunkTypeTableColumn,
+	}
+	result, err := h.chunks.ListPagedChunksByKnowledgeID(c.Request.Context(), documentID, pagination, chunkTypes)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	chunks, valid := result.Data.([]*types.Chunk)
+	if !valid {
+		h.fail(c, appserviceError(http.StatusInternalServerError, "WEKNORA_ERROR", "Chunk list has an invalid shape", nil))
+		return
+	}
+	views := make([]pixLabChunkView, 0, len(chunks))
+	for _, chunk := range chunks {
+		if chunk == nil || chunk.KnowledgeBaseID != binding.KnowledgeBaseID || chunk.KnowledgeID != documentID {
+			continue
+		}
+		views = append(views, newPixLabChunkView(chunk))
+	}
+	h.success(c, http.StatusOK, gin.H{
+		"chunks": views, "total": result.Total, "page": result.Page, "page_size": result.PageSize,
+	})
+}
+
+func (h *PixLabWorkbenchHandler) GetDocumentChunk(c *gin.Context) {
+	h.getProjectChunk(c, c.Param("document_id"))
+}
+
+func (h *PixLabWorkbenchHandler) GetProjectChunk(c *gin.Context) {
+	h.getProjectChunk(c, "")
+}
+
+func (h *PixLabWorkbenchHandler) getProjectChunk(c *gin.Context, documentID string) {
+	_, binding, ok := h.scope(c)
+	if !ok || !h.requireChunkService(c) {
+		return
+	}
+	chunk, err := h.chunks.GetChunkByID(c.Request.Context(), c.Param("chunk_id"))
+	if err != nil || chunk == nil || chunk.KnowledgeBaseID != binding.KnowledgeBaseID ||
+		(documentID != "" && chunk.KnowledgeID != documentID) {
+		h.fail(c, appserviceError(http.StatusNotFound, "CHUNK_NOT_FOUND", "Chunk was not found", err))
+		return
+	}
+	h.success(c, http.StatusOK, newPixLabChunkView(chunk))
+}
+
+func (h *PixLabWorkbenchHandler) requireChunkService(c *gin.Context) bool {
+	if h.chunks != nil {
+		return true
+	}
+	h.fail(c, appserviceError(http.StatusServiceUnavailable, "WEKNORA_ERROR", "Chunk service is unavailable", nil))
+	return false
 }
 
 type pixLabChatSessionView struct {
