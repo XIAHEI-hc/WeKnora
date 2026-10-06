@@ -15,6 +15,7 @@
     :agent-image-upload-enabled="agentImageUploadEnabled"
     :use-session-header-title="useSessionHeaderTitle"
     :host-context="hostContext"
+    :workbench-project-code="workbenchProjectCode"
     @session-title="(title: string) => emit('session-title', title)"
     @messages-state="(has: boolean) => emit('messages-state', has)"
   />
@@ -41,6 +42,7 @@ defineProps<{
   agentImageUploadEnabled?: boolean
   useSessionHeaderTitle?: boolean
   hostContext?: Record<string, unknown>
+  workbenchProjectCode?: string
 }>()
 
 const emit = defineEmits<{

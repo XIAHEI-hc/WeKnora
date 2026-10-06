@@ -87,6 +87,9 @@ type Session struct {
 	// UserID is the owner scope for this session. WeKnora user UUIDs, API
 	// external-user principals, and embed visitor principals all use this column.
 	UserID string `json:"user_id,omitempty" gorm:"type:varchar(512);index"`
+	// PixLabProjectCode scopes sessions created by the PixLab workbench.
+	// Ordinary Web, API, IM and embed sessions keep this column NULL.
+	PixLabProjectCode *string `json:"pixlab_project_code,omitempty" gorm:"column:pixlab_project_code;type:varchar(64);index"`
 	// IsPinned indicates whether the session is pinned in the list.
 	IsPinned bool `json:"is_pinned" gorm:"default:false"`
 	// PinnedAt records when the session was pinned; nil when not pinned.

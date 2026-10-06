@@ -186,6 +186,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewAgentShareRepository))
 	must(container.Provide(repository.NewEmbedChannelRepository))
 	must(container.Provide(repository.NewMCPEndpointRepository))
+	must(container.Provide(repository.NewPixLabWorkbenchRepository))
 	must(container.Provide(repository.NewTenantDisabledSharedAgentRepository))
 	must(container.Provide(repository.NewUserResourceFavoriteRepository))
 	must(container.Provide(service.NewWebSearchStateService))
@@ -286,6 +287,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewWikiLintService))
 	must(container.Provide(service.NewEmbedChannelService))
 	must(container.Provide(service.NewMCPEndpointService))
+	must(container.Provide(service.NewPixLabWorkbenchService))
 	must(container.Provide(mcpserver.NewServer))
 
 	// Web search service (needed by AgentService)
@@ -594,6 +596,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewEmbedChannelHandler))
 	must(container.Provide(handler.NewMCPEndpointHandler))
 	must(container.Provide(handler.NewWeKnoraCloudHandler))
+	must(container.Provide(handler.NewPixLabWorkbenchHandlerWithDependencies))
 	logger.Debugf(ctx, "[Container] HTTP handlers registered")
 
 	// Wire the chat package's local image resolver so multimodal chat can read

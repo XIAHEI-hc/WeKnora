@@ -84,6 +84,7 @@ type RouterParams struct {
 	IMHandler                    *handler.IMHandler
 	EmbedChannelHandler          *handler.EmbedChannelHandler
 	EmbedChannelService          interfaces.EmbedChannelService
+	PixLabWorkbenchHandler       *handler.PixLabWorkbenchHandler
 	MCPEndpointHandler           *handler.MCPEndpointHandler
 	MCPEndpointService           interfaces.MCPEndpointService
 	MCPServer                    *mcpserver.Server
@@ -185,6 +186,11 @@ func NewRouter(params RouterParams) *gin.Engine {
 		params.StorageBackendResolver,
 		params.ResourceCatalog,
 	)
+
+	// PixLab workbench uses its own HttpOnly cookie, CSRF token and PixLab
+	// backchannel validation. It must not inherit anonymous embed auth or the
+	// normal WeKnora JWT/API-key middleware.
+	RegisterPixLabWorkbenchRoutes(r, params.PixLabWorkbenchHandler)
 
 	// Workspace MCP server surface (/mcp/:endpoint_id): bearer-token auth per
 	// endpoint, so it must precede the global Auth middleware.

@@ -130,6 +130,7 @@ import EmbedUserMessage from '@/views/embed/EmbedUserMessage.vue'
 import ChatReferencesDrawer from '@/components/ChatReferencesDrawer.vue'
 import { provideChatReferencesDrawer } from '@/composables/useChatReferencesDrawer'
 import { useEmbedChatSession } from '@/composables/useEmbedChatSession'
+import { usePixLabChatSession } from '@/composables/usePixLabChatSession'
 import FollowUpSuggestions from '@/components/chat/FollowUpSuggestions.vue'
 import MessageTimestamp from '@/components/chat/MessageTimestamp.vue'
 import { shouldShowConversationTimestamp } from '@/utils/messageTimestamp'
@@ -156,6 +157,7 @@ const props = defineProps<{
   agentImageUploadEnabled?: boolean
   useSessionHeaderTitle?: boolean
   hostContext?: Record<string, unknown>
+  workbenchProjectCode?: string
 }>()
 
 const emit = defineEmits<{
@@ -257,6 +259,34 @@ watch(() => props.hostContext, (ctx) => {
   hostContextRef.value = ctx || {}
 }, { deep: true })
 
+const chatSession = props.workbenchProjectCode
+  ? usePixLabChatSession({
+    projectCode: props.workbenchProjectCode,
+    sessionId: sessionIdRef,
+    onMessagesChange: (has) => emit('messages-state', has),
+    onSessionTitle: (title) => {
+      if (props.useSessionHeaderTitle) emit('session-title', title)
+    },
+  })
+  : useEmbedChatSession({
+    sessionId: sessionIdRef,
+    sessionSig: sessionSigRef,
+    visitorId: visitorIdRef,
+    channelId: props.channelId,
+    token: props.token,
+    agentId: props.agentId,
+    kbIds: props.kbIds,
+    allowWebSearch: props.allowWebSearch,
+    allowFileUpload: props.allowFileUpload,
+    hostContext: hostContextRef,
+    onMessagesChange: (has) => emit('messages-state', has),
+    onSessionTitle: (title) => {
+      if (props.useSessionHeaderTitle) emit('session-title', title)
+    },
+    onTurnComplete: (message) => { void loadFollowUpSuggestions(message, true) },
+    onMessagesLoaded: loadPersistedFollowUps,
+  })
+
 const {
   messagesList,
   loading,
@@ -273,26 +303,7 @@ const {
   sendMsg,
   handleStopGeneration,
   setSuggestionAttribution,
-} = useEmbedChatSession({
-  sessionId: sessionIdRef,
-  sessionSig: sessionSigRef,
-  visitorId: visitorIdRef,
-  channelId: props.channelId,
-  token: props.token,
-  agentId: props.agentId,
-  kbIds: props.kbIds,
-  allowWebSearch: props.allowWebSearch,
-  allowFileUpload: props.allowFileUpload,
-  hostContext: hostContextRef,
-  onMessagesChange: (has) => emit('messages-state', has),
-  onSessionTitle: (title) => {
-    if (props.useSessionHeaderTitle) {
-      emit('session-title', title)
-    }
-  },
-  onTurnComplete: (message) => { void loadFollowUpSuggestions(message, true) },
-  onMessagesLoaded: loadPersistedFollowUps,
-})
+} = chatSession
 
 const welcomeText = computed(() => props.welcomeMessage?.trim() || '')
 const hasWelcomeText = computed(() => welcomeText.value.length > 0)
@@ -315,6 +326,10 @@ const showSuggestedBlock = computed(() =>
   && (suggestedLoading.value || suggestedQuestions.value.length > 0))
 
 const fetchSuggestedQuestions = async () => {
+  if (props.workbenchProjectCode) {
+    suggestedQuestions.value = []
+    return
+  }
   if (!props.showSuggestedQuestions || !props.channelId || !props.token) {
     suggestedQuestions.value = []
     return

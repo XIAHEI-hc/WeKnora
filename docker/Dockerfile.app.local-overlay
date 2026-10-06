@@ -1,0 +1,8 @@
+# Local integration image for environments that already have the official
+# WeKnora runtime image. Build the Go binary separately, then overlay only the
+# application and migrations while retaining the existing runtime toolchain.
+ARG WEKNORA_RUNTIME_IMAGE=wechatopenai/weknora-app:latest
+FROM ${WEKNORA_RUNTIME_IMAGE}
+
+COPY --chown=appuser:appuser .local-build/WeKnora /app/WeKnora
+COPY --chown=appuser:appuser migrations /app/migrations

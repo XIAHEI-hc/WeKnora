@@ -31,6 +31,7 @@ var versionedSQLiteTables = []string{
 	"fork_snapshot_leases",
 	"mcp_endpoints",
 	"message_artifacts",
+	"pixlab_project_bindings",
 	"tenant_skills",
 	"tenant_skill_snapshots",
 	"tenant_skill_catalog",
@@ -52,6 +53,7 @@ var versionedSQLiteColumns = map[string][]string{
 		"parent_session_id", "forked_from_message_id", "fork_bootstrap", // 000097
 		"sandbox_config_tenant_id", // 000027
 		"host_workspace_dir",       // 000029
+		"pixlab_project_code",      // 000034
 	},
 	"tenant_invitations": {"token", "accepted_count"},        // 000054
 	"embed_channels":     {"allow_memory"},                   // 000060
@@ -69,7 +71,7 @@ var versionedSQLiteColumns = map[string][]string{
 	}, // 000028
 }
 
-const expectedSQLiteMigrationVersion = 33
+const expectedSQLiteMigrationVersion = 35
 
 func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 	repoRoot := sqliteRepoRoot(t)
