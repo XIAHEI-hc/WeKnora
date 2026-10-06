@@ -13,6 +13,7 @@ func RegisterPixLabWorkbenchRoutes(r *gin.Engine, workbench *handler.PixLabWorkb
 	}
 	root := r.Group("/api/v1/pixlab-workbench")
 	root.POST("/session", workbench.CreateSession)
+	root.POST("/session/resume", workbench.ResumeSession)
 	root.DELETE("/session", workbench.DeleteSession)
 
 	projects := root.Group("/projects/:project_code", workbench.AuthenticateProject())

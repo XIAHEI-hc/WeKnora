@@ -4,6 +4,12 @@ import { listChatMessages, stopChatAnswer, streamChatAnswer, WorkbenchApiError, 
 import { useChatStreamHandler } from '@/composables/useChatStreamHandler'
 import { useStickyBottomOnResize } from '@/composables/useStickyBottomOnResize'
 import { embedToast } from '@/utils/embedToast'
+import {
+  historyPageMayHaveOlderRows,
+  oldestHistoryCursor,
+  PIXLAB_CHAT_HISTORY_PAGE_SIZE,
+  prependDistinctHistory,
+} from './pixlabChatHistory'
 
 type WorkbenchChatMessage = WorkbenchMessage & {
   knowledge_references?: unknown[]
@@ -53,9 +59,11 @@ export function usePixLabChatSession(options: {
   const isFirstEnter = ref(true)
   const currentAssistantMessageId = ref('')
   const fullContent = ref('')
+  const oldestCursor = ref('')
   const scrollContainer = options.scrollContainer ?? ref<HTMLElement | null>(null)
   const userHasScrolledUp = ref(false)
   let streamController: AbortController | undefined
+  let loadRevision = 0
 
   watch(() => messagesList.length, (length) => options.onMessagesChange?.(length > 0), { immediate: true })
 
@@ -73,7 +81,9 @@ export function usePixLabChatSession(options: {
   }
 
   const handleScroll = () => {
-    if (scrollContainer.value) userHasScrolledUp.value = !isNearBottom()
+    if (!scrollContainer.value) return
+    userHasScrolledUp.value = !isNearBottom()
+    if (scrollContainer.value.scrollTop <= 4) void loadOlderMessages()
   }
 
   useStickyBottomOnResize(scrollContainer, userHasScrolledUp)
@@ -103,21 +113,78 @@ export function usePixLabChatSession(options: {
 
   async function loadMessages() {
     if (options.enabled && !options.enabled()) return
+    const revision = ++loadRevision
+    const sessionId = options.sessionId.value
     if (!options.sessionId.value) {
       messagesList.splice(0)
+      oldestCursor.value = ''
+      hasMoreHistory.value = false
       historyLoading.value = false
       return
     }
     historyLoading.value = true
+    historyLoadingMore.value = false
     try {
-      const result = await listChatMessages(options.projectCode, options.sessionId.value)
-      messagesList.splice(0, messagesList.length, ...result.messages.map((message) => mapMessage(message, options.knowledgeBaseId) as unknown as Record<string, unknown>))
-      hasMoreHistory.value = false
+      const result = await listChatMessages(
+        options.projectCode,
+        sessionId,
+        PIXLAB_CHAT_HISTORY_PAGE_SIZE,
+      )
+      if (revision !== loadRevision || sessionId !== options.sessionId.value) return
+      const mapped = result.messages.map((message) => mapMessage(message, options.knowledgeBaseId))
+      messagesList.splice(0, messagesList.length, ...mapped as unknown as Record<string, unknown>[])
+      oldestCursor.value = oldestHistoryCursor(result.messages)
+      hasMoreHistory.value = historyPageMayHaveOlderRows(result.messages.length)
       scrollToBottom(true)
     } catch {
-      embedToast(t('error.streamFailed'))
+      if (revision === loadRevision) embedToast(t('error.streamFailed'))
     } finally {
-      historyLoading.value = false
+      if (revision === loadRevision) historyLoading.value = false
+    }
+  }
+
+  async function loadOlderMessages() {
+    if (options.enabled && !options.enabled()) return
+    if (historyLoading.value || historyLoadingMore.value || !hasMoreHistory.value) return
+    const sessionId = options.sessionId.value
+    const revision = loadRevision
+    const cursor = oldestCursor.value
+    const container = scrollContainer.value
+    if (!sessionId || !cursor || !container) {
+      hasMoreHistory.value = false
+      return
+    }
+    historyLoadingMore.value = true
+    const previousHeight = container.scrollHeight
+    try {
+      const result = await listChatMessages(
+        options.projectCode,
+        sessionId,
+        PIXLAB_CHAT_HISTORY_PAGE_SIZE,
+        cursor,
+      )
+      if (revision !== loadRevision || sessionId !== options.sessionId.value) return
+      const nextCursor = oldestHistoryCursor(result.messages)
+      const mapped = result.messages.map((message) => mapMessage(message, options.knowledgeBaseId))
+      const distinct = prependDistinctHistory(
+        messagesList as unknown as WorkbenchChatMessage[],
+        mapped,
+      )
+      if (!result.messages.length || !nextCursor || nextCursor === cursor || !distinct.length) {
+        hasMoreHistory.value = false
+        return
+      }
+      messagesList.unshift(...distinct as unknown as Record<string, unknown>[])
+      oldestCursor.value = nextCursor
+      hasMoreHistory.value = historyPageMayHaveOlderRows(result.messages.length)
+      await nextTick()
+      if (scrollContainer.value) {
+        scrollContainer.value.scrollTop += scrollContainer.value.scrollHeight - previousHeight
+      }
+    } catch {
+      if (revision === loadRevision) embedToast(t('error.streamFailed'))
+    } finally {
+      if (revision === loadRevision) historyLoadingMore.value = false
     }
   }
 
@@ -200,6 +267,7 @@ export function usePixLabChatSession(options: {
     shouldShowGlobalTypingIndicator,
     getUserQuery: (index: number) => String(messagesList[index - 1]?.content || ''),
     handleScroll,
+    loadOlderMessages,
     scrollToBottom,
     onClickScrollToBottom: () => { userHasScrolledUp.value = false; scrollToBottom(true) },
     sendMsg,

@@ -179,10 +179,40 @@ func TestPixLabWorkbenchSessionScopesProjectCSRFAndBinding(t *testing.T) {
 		Role:     types.TenantRoleContributor,
 	}, types.CallerFromContext(scoped))
 
+	mini.FastForward(10 * time.Minute)
+	remainingBefore, err := redisClient.PTTL(context.Background(), sessionRedisKey(sessionToken)).Result()
+	require.NoError(t, err)
+	resumedCSRF, resumedTTL, resumedSession, resumedBinding, err := service.ResumeSession(
+		context.Background(), sessionToken, "PROJECT_P",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, resumedCSRF)
+	require.NotEqual(t, csrfToken, resumedCSRF)
+	require.Equal(t, "pixlab-user", resumedSession.Principal.UserID)
+	require.Equal(t, "kb-p", resumedBinding.KnowledgeBaseID)
+	remainingAfter, err := redisClient.PTTL(context.Background(), sessionRedisKey(sessionToken)).Result()
+	require.NoError(t, err)
+	require.LessOrEqual(t, remainingAfter, remainingBefore)
+	require.GreaterOrEqual(t, remainingAfter, remainingBefore-time.Second)
+	require.LessOrEqual(t, resumedTTL, remainingBefore)
+	require.GreaterOrEqual(t, resumedTTL, remainingBefore-time.Second)
+	_, _, _, err = service.Authenticate(context.Background(), sessionToken, "PROJECT_P", csrfToken, true)
+	assertWorkbenchError(t, err, http.StatusForbidden, "CSRF_FAILED")
+	_, _, _, err = service.Authenticate(context.Background(), sessionToken, "PROJECT_P", resumedCSRF, true)
+	require.NoError(t, err)
+	csrfToken = resumedCSRF
+
 	_, _, _, err = service.Authenticate(context.Background(), sessionToken, "PROJECT_OTHER", csrfToken, true)
 	assertWorkbenchError(t, err, http.StatusNotFound, "SESSION_SCOPE_MISMATCH")
 	_, _, _, err = service.Authenticate(context.Background(), sessionToken, "PROJECT_P", "wrong", true)
 	assertWorkbenchError(t, err, http.StatusForbidden, "CSRF_FAILED")
+
+	principalClient.principal.Capabilities = nil
+	_, _, _, err = service.Authenticate(context.Background(), sessionToken, "PROJECT_P", csrfToken, true)
+	assertWorkbenchError(t, err, http.StatusForbidden, "PROJECT_FORBIDDEN")
+	principalClient.principal.Capabilities = []string{
+		types.PixLabCapabilityRead, types.PixLabCapabilityUpload, types.PixLabCapabilityChat,
+	}
 
 	binding.Revision = 4
 	_, _, _, err = service.Authenticate(context.Background(), sessionToken, "PROJECT_P", csrfToken, true)

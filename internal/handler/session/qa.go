@@ -729,6 +729,7 @@ func (h *Handler) setupSSEStream(reqCtx *qaRequestContext, generateTitle bool, m
 
 	eventBus := event.NewEventBus()
 	asyncCtx, cancel := context.WithCancel(logger.CloneContext(baseCtx))
+	bindAuthorizationRevocation(baseCtx, cancel)
 
 	streamCtx := &sseStreamContext{
 		eventBus:         eventBus,

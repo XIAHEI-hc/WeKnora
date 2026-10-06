@@ -38,6 +38,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import { collectDroppedFiles } from './collectDroppedFiles'
 import { PIXLAB_PROJECT_CONTEXT } from '@/pixlab-workbench/context'
+import { canDropOnProjectKnowledge, isChatFileDropRoute } from './projectDropPolicy'
 
 const props = withDefaults(defineProps<{ pixlabProject?: boolean }>(), {
     pixlabProject: false,
@@ -85,10 +86,8 @@ const getCurrentKbId = (): string | null => {
     return (route.params as any)?.kbId as string || null
 }
 
-const CHAT_DROP_ROUTE_NAMES = new Set(['chat', 'globalCreatChat', 'kbCreatChat', 'pixlabProjectChat', 'pixlabProjectNewChat']);
-
 const isChatDropRoute = () => {
-    return CHAT_DROP_ROUTE_NAMES.has(String(route.name || ''));
+    return isChatFileDropRoute(route.name);
 }
 
 // 检查知识库初始化状态
@@ -140,7 +139,13 @@ const shouldHandleGlobalFileDrag = (event: DragEvent): boolean => {
     // Settings and its teleported skill drawers own their uploads. This runs
     // in document capture, before a local drop handler can stop propagation.
     const enabled = !uiStore.showSettingsModal && (
-        isChatDropRoute() || (route.name === 'knowledgeBaseDetail' && !!getCurrentKbId())
+        isChatDropRoute() ||
+        (route.name === 'knowledgeBaseDetail' && !!getCurrentKbId()) ||
+        canDropOnProjectKnowledge(
+            route.name,
+            pixlabProject.value,
+            pixlabContext?.value?.capabilities || [],
+        )
     );
     if (!enabled) {
         dragCounter = 0;

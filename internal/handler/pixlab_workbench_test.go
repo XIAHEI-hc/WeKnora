@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,22 @@ type handlerWorkbenchKnowledge struct {
 	tenantID     uint64
 	tenantInfoID uint64
 	documents    map[string]*types.Knowledge
+	reparseCalls int
+}
+
+func (s *handlerWorkbenchKnowledge) ReparseKnowledge(
+	_ context.Context,
+	id string,
+	_ *types.KnowledgeProcessOverrides,
+) (*types.Knowledge, error) {
+	document := s.documents[id]
+	if document == nil {
+		return nil, errors.New("knowledge not found")
+	}
+	s.reparseCalls++
+	copy := *document
+	copy.ParseStatus = types.ParseStatusPending
+	return &copy, nil
 }
 
 func (s *handlerWorkbenchKnowledge) GetKnowledgeByID(_ context.Context, id string) (*types.Knowledge, error) {
@@ -105,25 +122,41 @@ func (s *handlerWorkbenchKnowledge) withTest(t *testing.T) *handlerWorkbenchKnow
 }
 
 type handlerPrincipalClient struct {
-	principal types.PixLabPrincipal
+	mu          sync.RWMutex
+	principal   types.PixLabPrincipal
+	validateErr error
 }
 
 func (c *handlerPrincipalClient) Redeem(_ context.Context, _, _ string) (*types.PixLabPrincipal, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	copy := c.principal
 	return &copy, nil
 }
 
 func (c *handlerPrincipalClient) Validate(_ context.Context, _ types.PixLabPrincipal) (*types.PixLabPrincipal, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.validateErr != nil {
+		return nil, c.validateErr
+	}
 	copy := c.principal
 	return &copy, nil
 }
 
+func (c *handlerPrincipalClient) failValidation(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.validateErr = err
+}
+
 type workbenchHandlerFixture struct {
-	handler      *PixLabWorkbenchHandler
-	knowledge    *handlerWorkbenchKnowledge
-	sessionToken string
-	csrfToken    string
-	redis        *redis.Client
+	handler         *PixLabWorkbenchHandler
+	knowledge       *handlerWorkbenchKnowledge
+	sessionToken    string
+	csrfToken       string
+	redis           *redis.Client
+	principalClient *handlerPrincipalClient
 }
 
 type handlerSessionService struct {
@@ -234,7 +267,106 @@ func newWorkbenchHandlerFixture(t *testing.T) *workbenchHandlerFixture {
 	return &workbenchHandlerFixture{
 		handler: NewPixLabWorkbenchHandler(service), knowledge: knowledge,
 		sessionToken: sessionToken, csrfToken: csrfToken, redis: redisClient,
+		principalClient: principalClient,
 	}
+}
+
+func TestPixLabWorkbenchStreamAuthorizationRevocationCancelsRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	fixture.handler.streamAuthorizationCheckInterval = 5 * time.Millisecond
+	fixture.principalClient.failValidation(errors.New("membership revoked"))
+
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/pixlab-workbench/projects/PROJECT_P/sessions/s1/continue-stream", nil)
+	c.Request.AddCookie(&http.Cookie{Name: appservice.PixLabWorkbenchCookieName, Value: fixture.sessionToken})
+	c.Params = gin.Params{{Key: "project_code", Value: "PROJECT_P"}}
+
+	stop := fixture.handler.watchStreamAuthorization(c)
+	defer stop()
+
+	select {
+	case <-c.Request.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("stream request remained active after PixLab authorization was revoked")
+	}
+}
+
+func TestPixLabWorkbenchResumeWithoutCookieIsQuiet(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	router := gin.New()
+	router.POST("/api/v1/pixlab-workbench/session/resume", fixture.handler.ResumeSession)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/pixlab-workbench/session/resume",
+		bytes.NewBufferString(`{"project_code":"PROJECT_P"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1:5173")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), `"resumed":false`)
+	require.NotContains(t, response.Body.String(), "csrf_token")
+}
+
+func TestPixLabWorkbenchResumeRotatesCSRFForValidCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	router := gin.New()
+	router.POST("/api/v1/pixlab-workbench/session/resume", fixture.handler.ResumeSession)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/pixlab-workbench/session/resume",
+		bytes.NewBufferString(`{"project_code":"PROJECT_P"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1:5173")
+	request.AddCookie(&http.Cookie{Name: appservice.PixLabWorkbenchCookieName, Value: fixture.sessionToken})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), `"resumed":true`)
+	require.Contains(t, response.Body.String(), `"project_code":"PROJECT_P"`)
+	require.Contains(t, response.Body.String(), "csrf_token")
+	require.NotContains(t, response.Body.String(), fixture.csrfToken)
+	require.NotEmpty(t, response.Header().Values("Set-Cookie"))
+}
+
+func TestPixLabWorkbenchDocumentRetryCapabilityIsUploaderAndStatusScoped(t *testing.T) {
+	principal := types.PixLabPrincipal{
+		UserID:       "pixlab-user",
+		Capabilities: []string{types.PixLabCapabilityRead, types.PixLabCapabilityUpload},
+	}
+	document := &types.Knowledge{
+		ID:          "document-1",
+		ParseStatus: types.ParseStatusFailed,
+		Metadata:    types.JSON(`{"pixlab_uploader_user_id":"pixlab-user"}`),
+	}
+
+	require.True(t, newPixLabDocumentView(document, principal).CanReparse)
+
+	otherUser := principal
+	otherUser.UserID = "other-user"
+	require.False(t, newPixLabDocumentView(document, otherUser).CanReparse)
+
+	readOnly := principal
+	readOnly.Capabilities = []string{types.PixLabCapabilityRead}
+	require.False(t, newPixLabDocumentView(document, readOnly).CanReparse)
+
+	completed := *document
+	completed.ParseStatus = types.ParseStatusCompleted
+	require.False(t, newPixLabDocumentView(&completed, principal).CanReparse)
+
+	cancelled := *document
+	cancelled.ParseStatus = types.ParseStatusCancelled
+	require.True(t, newPixLabDocumentView(&cancelled, principal).CanReparse)
 }
 
 func TestPixLabWorkbenchUploadUsesBoundKnowledgeBaseAndTrustedMetadata(t *testing.T) {
@@ -285,6 +417,107 @@ func TestPixLabWorkbenchUploadRejectsTraversalBeforeKnowledgeService(t *testing.
 	require.Zero(t, fixture.knowledge.createCalls)
 }
 
+func TestPixLabWorkbenchReparseEnforcesUploaderStatusAndKnowledgeBase(t *testing.T) {
+	tests := []struct {
+		name       string
+		document   *types.Knowledge
+		wantStatus int
+		wantCode   string
+		wantCalls  int
+	}{
+		{
+			name: "own failed document",
+			document: &types.Knowledge{
+				ID: "document-1", KnowledgeBaseID: "kb-p", ParseStatus: types.ParseStatusFailed,
+				Metadata: types.JSON(`{"pixlab_uploader_user_id":"pixlab-user"}`),
+			},
+			wantStatus: http.StatusAccepted, wantCalls: 1,
+		},
+		{
+			name: "another uploader",
+			document: &types.Knowledge{
+				ID: "document-1", KnowledgeBaseID: "kb-p", ParseStatus: types.ParseStatusFailed,
+				Metadata: types.JSON(`{"pixlab_uploader_user_id":"other-user"}`),
+			},
+			wantStatus: http.StatusForbidden, wantCode: "PROJECT_FORBIDDEN",
+		},
+		{
+			name: "completed document",
+			document: &types.Knowledge{
+				ID: "document-1", KnowledgeBaseID: "kb-p", ParseStatus: types.ParseStatusCompleted,
+				Metadata: types.JSON(`{"pixlab_uploader_user_id":"pixlab-user"}`),
+			},
+			wantStatus: http.StatusConflict, wantCode: "DOCUMENT_NOT_RETRYABLE",
+		},
+		{
+			name: "other knowledge base",
+			document: &types.Knowledge{
+				ID: "document-1", KnowledgeBaseID: "kb-q", ParseStatus: types.ParseStatusFailed,
+				Metadata: types.JSON(`{"pixlab_uploader_user_id":"pixlab-user"}`),
+			},
+			wantStatus: http.StatusNotFound, wantCode: "DOCUMENT_NOT_FOUND",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			fixture := newWorkbenchHandlerFixture(t)
+			fixture.knowledge.documents = map[string]*types.Knowledge{"document-1": test.document}
+			router := gin.New()
+			router.POST(
+				"/api/v1/pixlab-workbench/projects/:project_code/documents/:document_id/reparse",
+				fixture.handler.AuthenticateProject(), fixture.handler.ReparseDocument,
+			)
+			request := authenticatedWorkbenchRequest(
+				t, fixture, http.MethodPost,
+				"/api/v1/pixlab-workbench/projects/PROJECT_P/documents/document-1/reparse",
+				bytes.NewBufferString(`{}`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			require.Equal(t, test.wantStatus, response.Code, response.Body.String())
+			if test.wantCode != "" {
+				require.Contains(t, response.Body.String(), test.wantCode)
+			}
+			require.Equal(t, test.wantCalls, fixture.knowledge.reparseCalls)
+		})
+	}
+}
+
+func TestPixLabWorkbenchWriteRequestsRequireCurrentCSRF(t *testing.T) {
+	for _, csrf := range []string{"", "wrong-csrf"} {
+		t.Run("csrf="+csrf, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			fixture := newWorkbenchHandlerFixture(t)
+			fixture.knowledge.documents = map[string]*types.Knowledge{
+				"document-1": {
+					ID: "document-1", KnowledgeBaseID: "kb-p", ParseStatus: types.ParseStatusFailed,
+					Metadata: types.JSON(`{"pixlab_uploader_user_id":"pixlab-user"}`),
+				},
+			}
+			router := gin.New()
+			router.POST(
+				"/api/v1/pixlab-workbench/projects/:project_code/documents/:document_id/reparse",
+				fixture.handler.AuthenticateProject(), fixture.handler.ReparseDocument,
+			)
+			request := authenticatedWorkbenchRequest(
+				t, fixture, http.MethodPost,
+				"/api/v1/pixlab-workbench/projects/PROJECT_P/documents/document-1/reparse",
+				bytes.NewBufferString(`{}`),
+			)
+			request.Header.Set("X-CSRF-Token", csrf)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+			require.Contains(t, response.Body.String(), "CSRF_FAILED")
+			require.Zero(t, fixture.knowledge.reparseCalls)
+		})
+	}
+}
+
 func TestPixLabWorkbenchSessionListIsScopedToUserAndProject(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	fixture := newWorkbenchHandlerFixture(t)
@@ -333,6 +566,64 @@ func TestPixLabWorkbenchMessagesHideCrossUserAndCrossProjectSessions(t *testing.
 		require.Contains(t, response.Body.String(), "SESSION_SCOPE_MISMATCH")
 	}
 	require.Zero(t, messages.calls, "message storage must not be queried for an out-of-scope session")
+}
+
+func TestPixLabWorkbenchDeleteAndStopHideCrossUserSessions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	projectP := "PROJECT_P"
+	fixture.handler.sessions = &handlerSessionService{sessions: []*types.Session{
+		{ID: "other-user-session", TenantID: 10000, UserID: "pixlab:other-user", PixLabProjectCode: &projectP},
+	}}
+	fixture.handler.messages = &handlerMessageService{}
+	fixture.handler.sessionHandler = &sessionhandler.Handler{}
+	router := gin.New()
+	router.DELETE(
+		"/api/v1/pixlab-workbench/projects/:project_code/sessions/:session_id",
+		fixture.handler.AuthenticateProject(), fixture.handler.DeleteChatSession,
+	)
+	router.POST(
+		"/api/v1/pixlab-workbench/projects/:project_code/sessions/:session_id/stop",
+		fixture.handler.AuthenticateProject(), fixture.handler.StopChatAnswer,
+	)
+
+	for _, methodAndSuffix := range [][2]string{
+		{http.MethodDelete, ""},
+		{http.MethodPost, "/stop"},
+	} {
+		request := authenticatedWorkbenchRequest(
+			t, fixture, methodAndSuffix[0],
+			"/api/v1/pixlab-workbench/projects/PROJECT_P/sessions/other-user-session"+methodAndSuffix[1],
+			bytes.NewBufferString(`{}`),
+		)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		require.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
+		require.Contains(t, response.Body.String(), "SESSION_SCOPE_MISMATCH")
+	}
+}
+
+func TestPixLabWorkbenchPreviewHidesOtherKnowledgeBase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := newWorkbenchHandlerFixture(t)
+	fixture.knowledge.documents = map[string]*types.Knowledge{
+		"document-q": {ID: "document-q", KnowledgeBaseID: "kb-q"},
+	}
+	router := gin.New()
+	router.GET(
+		"/api/v1/pixlab-workbench/projects/:project_code/documents/:document_id/preview",
+		fixture.handler.AuthenticateProject(), fixture.handler.PreviewDocument,
+	)
+	request := authenticatedWorkbenchRequest(
+		t, fixture, http.MethodGet,
+		"/api/v1/pixlab-workbench/projects/PROJECT_P/documents/document-q/preview",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusNotFound, response.Code, response.Body.String())
+	require.Contains(t, response.Body.String(), "DOCUMENT_NOT_FOUND")
 }
 
 func TestPixLabWorkbenchMessageHistoryWhitelistsBoundKnowledgeBaseCitations(t *testing.T) {

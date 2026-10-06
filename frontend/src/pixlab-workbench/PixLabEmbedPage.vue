@@ -44,7 +44,7 @@ const phase = ref<'waiting' | 'loading' | 'ready' | 'error'>('waiting')
 const error = ref('')
 const context = ref<WorkbenchContext | null>(null)
 const sessionId = ref('')
-let disposeBridge: (() => void) | undefined
+let bridge: ReturnType<typeof createBootstrapBridge> | undefined
 
 function friendlyError(cause: unknown) {
   if (cause instanceof WorkbenchApiError) {
@@ -76,9 +76,10 @@ async function bootstrap(message: PixLabBootstrapMessage) {
 
 onMounted(() => {
   if (!projectCode) { phase.value = 'error'; error.value = '项目地址无效。'; return }
-  disposeBridge = createBootstrapBridge(projectCode, (message) => void bootstrap(message))
+  bridge = createBootstrapBridge(projectCode, (message) => void bootstrap(message))
+  bridge.announceReady()
 })
-onBeforeUnmount(() => disposeBridge?.())
+onBeforeUnmount(() => bridge?.dispose())
 </script>
 
 <style scoped>

@@ -26,6 +26,7 @@ export interface WorkbenchDocument {
   processed_at?: string
   last_activity_at?: string
   stall_state?: string
+  can_reparse: boolean
 }
 
 export interface DocumentPage {
@@ -178,6 +179,21 @@ export async function createWorkbenchSession(ticket: string, projectCode: string
     },
   )
   csrfToken = result.csrf_token
+  return result
+}
+
+export async function resumeWorkbenchSession(projectCode: string) {
+  const result = await request<{
+    resumed: boolean
+    project_code?: string
+    csrf_token?: string
+    expires_in?: number
+  }>('/api/v1/pixlab-workbench/session/resume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_code: projectCode }),
+  })
+  if (result.resumed && result.csrf_token) csrfToken = result.csrf_token
   return result
 }
 

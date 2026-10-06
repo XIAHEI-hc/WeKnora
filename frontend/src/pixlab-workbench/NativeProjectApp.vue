@@ -15,6 +15,7 @@ import {
   clearWorkbenchSession,
   createWorkbenchSession,
   getContext,
+  resumeWorkbenchSession,
   WorkbenchApiError,
   type WorkbenchContext,
 } from './api'
@@ -26,7 +27,7 @@ const projectCode = String(route.params.projectCode || '')
 const phase = ref<'waiting' | 'loading' | 'ready' | 'error'>('waiting')
 const error = ref('')
 const context = ref<WorkbenchContext | null>(null)
-let disposeBridge: (() => void) | undefined
+let bridge: ReturnType<typeof createBootstrapBridge> | undefined
 
 provide(PIXLAB_PROJECT_CONTEXT, context)
 
@@ -61,17 +62,39 @@ async function bootstrap(message: PixLabBootstrapMessage) {
   }
 }
 
+async function start() {
+  if (!bridge) return
+  phase.value = 'loading'
+  try {
+    const resumed = await resumeWorkbenchSession(projectCode)
+    if (!resumed.resumed || resumed.project_code !== projectCode || !resumed.csrf_token) {
+      phase.value = 'waiting'
+      bridge.announceReady()
+      return
+    }
+    context.value = await getContext(projectCode)
+    setActiveProjectContext(context.value)
+    phase.value = 'ready'
+    notifyParent('wk-pixlab.authenticated', bridge.nonce)
+  } catch {
+    clearWorkbenchSession()
+    phase.value = 'waiting'
+    bridge.announceReady()
+  }
+}
+
 onMounted(() => {
   if (!projectCode) {
     phase.value = 'error'
     error.value = '项目地址无效。'
     return
   }
-  disposeBridge = createBootstrapBridge(projectCode, (message) => void bootstrap(message))
+  bridge = createBootstrapBridge(projectCode, (message) => void bootstrap(message))
+  void start()
 })
 
 onBeforeUnmount(() => {
-  disposeBridge?.()
+  bridge?.dispose()
   setActiveProjectContext(null)
   clearWorkbenchSession()
 })

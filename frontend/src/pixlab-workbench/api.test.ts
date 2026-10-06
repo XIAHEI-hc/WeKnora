@@ -6,6 +6,7 @@ import {
   createWorkbenchSession,
   deleteChatSession,
   listChatMessages,
+  resumeWorkbenchSession,
   streamChatAnswer,
   uploadDocument,
   WorkbenchApiError,
@@ -112,4 +113,31 @@ test('clearing the workbench session removes the CSRF credential', async () => {
   await deleteChatSession('PROJECT_P', 'session-1')
 
   assert.equal(headers[0].has('X-CSRF-Token'), false)
+})
+
+test('resuming a workbench session rotates the in-memory CSRF credential', async () => {
+  const calls: Array<{ url: string; headers: Headers }> = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    calls.push({ url, headers: new Headers(init.headers) })
+    if (url.endsWith('/session/resume')) {
+      return Response.json({
+        data: {
+          resumed: true,
+          project_code: 'PROJECT_P',
+          csrf_token: 'csrf-resumed',
+          expires_in: 1800,
+        },
+      })
+    }
+    return Response.json({ data: { deleted: true } })
+  }
+
+  const resumed = await resumeWorkbenchSession('PROJECT_P')
+  await deleteChatSession('PROJECT_P', 'session-1')
+
+  assert.equal(resumed.resumed, true)
+  assert.equal(calls[0].url, '/api/v1/pixlab-workbench/session/resume')
+  assert.equal(calls[0].headers.has('X-CSRF-Token'), false)
+  assert.equal(calls[1].headers.get('X-CSRF-Token'), 'csrf-resumed')
 })

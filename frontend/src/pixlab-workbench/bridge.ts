@@ -35,9 +35,13 @@ export function createBootstrapBridge(
   }
 
   window.addEventListener('message', receive)
-  window.parent.postMessage({ type: 'wk-pixlab.ready', version: 1, nonce }, targetOrigin)
-
-  return () => window.removeEventListener('message', receive)
+  return {
+    nonce,
+    announceReady: () => {
+      window.parent.postMessage({ type: 'wk-pixlab.ready', version: 1, nonce }, targetOrigin)
+    },
+    dispose: () => window.removeEventListener('message', receive),
+  }
 }
 
 export function notifyParent(type: 'wk-pixlab.authenticated' | 'wk-pixlab.error', nonce: string, code?: string) {

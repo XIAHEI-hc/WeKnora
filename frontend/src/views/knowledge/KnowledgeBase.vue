@@ -1417,6 +1417,7 @@ type KnowledgeCard = {
   stalled_minutes?: number;
   // Server verdict on a quiet row: 'queued' (backlogged) or 'stalled'.
   stall_state?: string;
+  can_reparse?: boolean;
 };
 // needsStatusPolling decides whether a card row is still "in flight"
 // enough that the doc list should keep refreshing it. Keep in sync with
@@ -1480,6 +1481,7 @@ const updateStatus = (analyzeList: KnowledgeCard[], delay = 1500) => {
             cardList.value[index].parse_status = parseStatus;
             cardList.value[index].summary_status = item.summary_status;
             cardList.value[index].description = item.description;
+            cardList.value[index].can_reparse = item.can_reparse;
             delete traceAvailableById[item.id];
             }
         });
@@ -1890,6 +1892,12 @@ const handleViewTrace = (index: number, item: KnowledgeCard) => {
 
 const confirmRebuildKnowledge = async (index: number, item: KnowledgeCard) => {
   if (isFAQ.value) return;
+  if (props.pixlabProject) {
+    if (!item.can_reparse || !item.id) return;
+    closeCardMoreMenu(index);
+    await submitReparse(item.id);
+    return;
+  }
   if (!canEdit.value) return;
   if (!item?.id) {
     MessagePlugin.warning(t('knowledgeEditor.messages.missingId'));
@@ -2576,6 +2584,7 @@ const handleKBEditorSuccess = (kbIdValue: string) => {
                     :can-edit="canEdit"
                     :can-download="canDownloadKnowledge"
                     :can-mutate-knowledge="canMutateKnowledge"
+                    :restricted-project="pixlabProject"
                     :trace-available-by-id="traceAvailableById"
                     :move-menu-mode="moveMenuMode"
                     :move-target-kbs="moveTargetKbs"
@@ -2601,6 +2610,7 @@ const handleKBEditorSuccess = (kbIdValue: string) => {
                   <DocumentListView :kb-id="kbId" :items="cardList" :folder-options="folderOptions"
                     :selected-ids="selectedIds"
                     :can-edit="canEdit" :can-download="canDownloadKnowledge" :can-mutate-knowledge="canMutateKnowledge"
+                    :restricted-project="pixlabProject"
                     :trace-visible-ids="traceAvailableById"
                     :move-menu-mode="moveMenuMode"
                     :move-target-kbs="moveTargetKbs"

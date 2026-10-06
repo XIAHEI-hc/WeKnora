@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"encoding/json"
 	"errors"
@@ -28,21 +29,26 @@ import (
 )
 
 const (
-	pixLabSessionContextKey = "PixLabWorkbenchSession"
-	pixLabBindingContextKey = "PixLabWorkbenchBinding"
+	pixLabSessionContextKey                = "PixLabWorkbenchSession"
+	pixLabBindingContextKey                = "PixLabWorkbenchBinding"
+	pixLabStreamAuthorizationCheckInterval = 2 * time.Second
 )
 
 type PixLabWorkbenchHandler struct {
-	service        *appservice.PixLabWorkbenchService
-	sessions       interfaces.SessionService
-	messages       interfaces.MessageService
-	chunks         interfaces.ChunkService
-	sessionHandler *sessionhandler.Handler
-	spanRepo       repository.KnowledgeSpanRepository
+	service                          *appservice.PixLabWorkbenchService
+	sessions                         interfaces.SessionService
+	messages                         interfaces.MessageService
+	chunks                           interfaces.ChunkService
+	sessionHandler                   *sessionhandler.Handler
+	spanRepo                         repository.KnowledgeSpanRepository
+	streamAuthorizationCheckInterval time.Duration
 }
 
 func NewPixLabWorkbenchHandler(service *appservice.PixLabWorkbenchService) *PixLabWorkbenchHandler {
-	return &PixLabWorkbenchHandler{service: service}
+	return &PixLabWorkbenchHandler{
+		service:                          service,
+		streamAuthorizationCheckInterval: pixLabStreamAuthorizationCheckInterval,
+	}
 }
 
 // NewPixLabWorkbenchHandlerWithDependencies is the production composition
@@ -58,6 +64,7 @@ func NewPixLabWorkbenchHandlerWithDependencies(
 	return &PixLabWorkbenchHandler{
 		service: service, sessions: sessions, messages: messages, chunks: chunks,
 		sessionHandler: sessionHandler, spanRepo: spanRepo,
+		streamAuthorizationCheckInterval: pixLabStreamAuthorizationCheckInterval,
 	}
 }
 
@@ -97,6 +104,51 @@ func (h *PixLabWorkbenchHandler) CreateSession(c *gin.Context) {
 		"project_code": principal.ProjectCode,
 		"csrf_token":   csrfToken,
 		"expires_in":   int(config.SessionTTL.Seconds()),
+	})
+}
+
+type pixLabSessionResumeRequest struct {
+	ProjectCode string `json:"project_code" binding:"required"`
+}
+
+func (h *PixLabWorkbenchHandler) ResumeSession(c *gin.Context) {
+	if !h.requireOrigin(c) {
+		return
+	}
+	var request pixLabSessionResumeRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "project_code is required", err))
+		return
+	}
+	token, cookieErr := c.Cookie(appservice.PixLabWorkbenchCookieName)
+	if cookieErr != nil || strings.TrimSpace(token) == "" {
+		h.success(c, http.StatusOK, gin.H{"resumed": false})
+		return
+	}
+	csrfToken, remaining, session, _, err := h.service.ResumeSession(
+		c.Request.Context(), token, request.ProjectCode,
+	)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	config := h.service.Config()
+	maxAge := int((remaining + time.Second - 1) / time.Second)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(
+		appservice.PixLabWorkbenchCookieName,
+		token,
+		maxAge,
+		"/api/v1/pixlab-workbench/",
+		"",
+		config.CookieSecure(),
+		true,
+	)
+	h.success(c, http.StatusOK, gin.H{
+		"resumed":      true,
+		"project_code": session.Principal.ProjectCode,
+		"csrf_token":   csrfToken,
+		"expires_in":   maxAge,
 	})
 }
 
@@ -185,7 +237,7 @@ func (h *PixLabWorkbenchHandler) ListFolders(c *gin.Context) {
 }
 
 func (h *PixLabWorkbenchHandler) ListDocuments(c *gin.Context) {
-	_, binding, ok := h.scope(c)
+	session, binding, ok := h.scope(c)
 	if !ok {
 		return
 	}
@@ -231,7 +283,7 @@ func (h *PixLabWorkbenchHandler) ListDocuments(c *gin.Context) {
 	views := make([]pixLabDocumentView, 0, len(documents))
 	for _, document := range documents {
 		if document != nil {
-			views = append(views, newPixLabDocumentView(document))
+			views = append(views, newPixLabDocumentView(document, session.Principal))
 		}
 	}
 	h.success(c, http.StatusOK, gin.H{
@@ -241,7 +293,7 @@ func (h *PixLabWorkbenchHandler) ListDocuments(c *gin.Context) {
 }
 
 func (h *PixLabWorkbenchHandler) GetDocument(c *gin.Context) {
-	_, binding, ok := h.scope(c)
+	session, binding, ok := h.scope(c)
 	if !ok {
 		return
 	}
@@ -250,7 +302,7 @@ func (h *PixLabWorkbenchHandler) GetDocument(c *gin.Context) {
 		h.fail(c, appserviceError(http.StatusNotFound, "DOCUMENT_NOT_FOUND", "Document was not found", err))
 		return
 	}
-	h.success(c, http.StatusOK, newPixLabDocumentView(document))
+	h.success(c, http.StatusOK, newPixLabDocumentView(document, session.Principal))
 }
 
 type pixLabDocumentStatusRequest struct {
@@ -258,7 +310,7 @@ type pixLabDocumentStatusRequest struct {
 }
 
 func (h *PixLabWorkbenchHandler) DocumentStatuses(c *gin.Context) {
-	_, binding, ok := h.scope(c)
+	session, binding, ok := h.scope(c)
 	if !ok {
 		return
 	}
@@ -284,7 +336,7 @@ func (h *PixLabWorkbenchHandler) DocumentStatuses(c *gin.Context) {
 			h.fail(c, appserviceError(http.StatusNotFound, "DOCUMENT_NOT_FOUND", "Document was not found", err))
 			return
 		}
-		views = append(views, newPixLabDocumentView(document))
+		views = append(views, newPixLabDocumentView(document, session.Principal))
 	}
 	h.success(c, http.StatusOK, gin.H{"documents": views})
 }
@@ -762,6 +814,8 @@ func (h *PixLabWorkbenchHandler) ChatAnswer(c *gin.Context) {
 	c.Request.ContentLength = int64(len(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.URL.RawQuery = withoutQueryParameter(c.Request.URL.Query(), "resource_urls").Encode()
+	stopAuthorizationWatch := h.watchStreamAuthorization(c)
+	defer stopAuthorizationWatch()
 	h.sessionHandler.KnowledgeQA(c)
 }
 
@@ -783,7 +837,62 @@ func (h *PixLabWorkbenchHandler) ContinueChatAnswer(c *gin.Context) {
 		return
 	}
 	c.Request.URL.RawQuery = withoutQueryParameter(c.Request.URL.Query(), "resource_urls").Encode()
+	stopAuthorizationWatch := h.watchStreamAuthorization(c)
+	defer stopAuthorizationWatch()
 	h.sessionHandler.ContinueStream(c)
+}
+
+func (h *PixLabWorkbenchHandler) watchStreamAuthorization(c *gin.Context) func() {
+	interval := h.streamAuthorizationCheckInterval
+	if interval <= 0 {
+		interval = pixLabStreamAuthorizationCheckInterval
+	}
+	token, _ := c.Cookie(appservice.PixLabWorkbenchCookieName)
+	projectCode := c.Param("project_code")
+	requestCtx, cancelRequest := context.WithCancel(c.Request.Context())
+	revoked := make(chan struct{})
+	stopped := make(chan struct{})
+	c.Request = c.Request.WithContext(sessionhandler.WithAuthorizationRevocation(requestCtx, revoked))
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopped:
+				return
+			case <-requestCtx.Done():
+				return
+			case <-ticker.C:
+				checkTimeout := h.service.Config().RequestTimeout
+				if checkTimeout <= 0 {
+					checkTimeout = interval
+				}
+				checkCtx, cancelCheck := context.WithTimeout(context.Background(), checkTimeout)
+				_, _, _, err := h.service.Authenticate(checkCtx, token, projectCode, "", false)
+				cancelCheck()
+				if err == nil {
+					continue
+				}
+				select {
+				case <-stopped:
+					return
+				case <-requestCtx.Done():
+					return
+				default:
+				}
+				logger.Warnf(requestCtx, "PixLab workbench stream authorization was revoked: %v", err)
+				close(revoked)
+				cancelRequest()
+				return
+			}
+		}
+	}()
+
+	return func() {
+		close(stopped)
+		cancelRequest()
+	}
 }
 
 func (h *PixLabWorkbenchHandler) projectChatSession(c *gin.Context, id string) (*types.Session, bool) {
@@ -946,9 +1055,10 @@ type pixLabDocumentView struct {
 	ProcessedAt          *time.Time      `json:"processed_at,omitempty"`
 	LastActivityAt       *time.Time      `json:"last_activity_at,omitempty"`
 	StallState           string          `json:"stall_state,omitempty"`
+	CanReparse           bool            `json:"can_reparse"`
 }
 
-func newPixLabDocumentView(document *types.Knowledge) pixLabDocumentView {
+func newPixLabDocumentView(document *types.Knowledge, principal types.PixLabPrincipal) pixLabDocumentView {
 	tags := make([]pixLabTagView, 0, len(document.Tags))
 	for _, tag := range document.Tags {
 		if tag != nil {
@@ -964,8 +1074,18 @@ func newPixLabDocumentView(document *types.Knowledge) pixLabDocumentView {
 		ErrorMessage:         document.ErrorMessage, Tags: tags,
 		CreatedAt: document.CreatedAt, UpdatedAt: document.UpdatedAt,
 		ProcessedAt: document.ProcessedAt, LastActivityAt: document.LastActivityAt,
-		StallState: document.StallState,
+		StallState: document.StallState, CanReparse: canReparsePixLabDocument(document, principal),
 	}
+}
+
+func canReparsePixLabDocument(document *types.Knowledge, principal types.PixLabPrincipal) bool {
+	if document == nil || !principal.HasCapability(types.PixLabCapabilityUpload) {
+		return false
+	}
+	if document.ParseStatus != types.ParseStatusFailed && document.ParseStatus != types.ParseStatusCancelled {
+		return false
+	}
+	return document.GetMetadata()["pixlab_uploader_user_id"] == principal.UserID
 }
 
 func (h *PixLabWorkbenchHandler) success(c *gin.Context, status int, data any) {

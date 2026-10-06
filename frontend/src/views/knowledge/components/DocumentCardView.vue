@@ -34,6 +34,7 @@ interface KnowledgeCard {
   created_at?: string;
   file_size?: number | string;
   channel?: string;
+  can_reparse?: boolean;
 }
 
 const props = defineProps<{
@@ -44,6 +45,7 @@ const props = defineProps<{
   canEdit: boolean;
   canDownload: boolean;
   canMutateKnowledge: boolean;
+  restrictedProject?: boolean;
   traceAvailableById: Record<string, boolean>;
   /** Every folder of the knowledge base, for the "move to folder" picker. */
   folderOptions?: FolderOption[];
@@ -111,8 +113,12 @@ const isParseInFlight = (status?: string): boolean =>
 const isTraceMenuVisible = (item: KnowledgeCard): boolean => {
   if (!item?.id) return false;
   if (isParseInFlight(item.parse_status)) return true;
+  if (props.restrictedProject && (item.parse_status === 'failed' || item.parse_status === 'cancelled')) return true;
   return props.traceAvailableById[item.id] === true;
 };
+
+const canShowActionMenu = (item: KnowledgeCard): boolean =>
+  props.canEdit || Boolean(item.can_reparse) || isTraceMenuVisible(item);
 
 const inFlightCardStatusText = (item: KnowledgeCard): string => {
   const stall = shownStall(item.stall_state, item.stalled_minutes);
@@ -354,7 +360,7 @@ const handleAction = (action: 'download' | 'edit' | 'view-trace' | 'reparse' | '
             />
           </div>
           <t-popup
-            v-else-if="canEdit"
+            v-else-if="canShowActionMenu(item)"
             :visible="activeMenuIndex === index"
             overlayClassName="card-more"
             :on-visible-change="(v: boolean) => onMenuVisibleChange(v, item, index)"
@@ -386,7 +392,7 @@ const handleAction = (action: 'download' | 'edit' | 'view-trace' | 'reparse' | '
 
               <!-- Normal menu -->
               <div v-else-if="moveMenuMode === 'normal'" class="card-menu">
-                <button type="button" class="card-menu-item card-tag-menu-action" @click.stop="editTags(item)">
+                <button v-if="canEdit" type="button" class="card-menu-item card-tag-menu-action" @click.stop="editTags(item)">
                   <t-icon class="icon" name="tag" />
                   <span>{{ t('knowledgeBase.tagEditDialogHeading') }}</span>
                 </button>
@@ -394,6 +400,8 @@ const handleAction = (action: 'download' | 'edit' | 'view-trace' | 'reparse' | '
                   :item="item"
                   :can-download="canDownload"
                   :can-mutate-knowledge="canMutateKnowledge"
+                  :can-reparse="canEdit || Boolean(item.can_reparse)"
+                  :restricted-project="restrictedProject"
                   :trace-visible="isTraceMenuVisible(item)"
                   :folders-available="Boolean(folderOptions?.length)"
                   @download="handleAction('download', item)"

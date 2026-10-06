@@ -32,6 +32,7 @@ interface KnowledgeItem {
   isMore?: boolean;
   stalled_minutes?: number;
   stall_state?: string;
+  can_reparse?: boolean;
 }
 
 const props = defineProps<{
@@ -41,6 +42,7 @@ const props = defineProps<{
   canEdit: boolean;
   canDownload: boolean;
   canMutateKnowledge: boolean;
+  restrictedProject?: boolean;
   traceVisibleIds: Record<string, boolean>;
   loading?: boolean;
   /** Every folder of the knowledge base, for the "move to folder" picker. */
@@ -260,6 +262,17 @@ const handleAction = (action: 'download' | 'edit' | 'reparse' | 'cancel-parse' |
   emit('action', action, item);
 };
 
+const projectTraceVisible = (item: KnowledgeItem): boolean => props.restrictedProject === true && (
+  item.parse_status === 'pending' ||
+  item.parse_status === 'processing' ||
+  item.parse_status === 'finalizing' ||
+  item.parse_status === 'failed' ||
+  item.parse_status === 'cancelled'
+);
+
+const canShowActionMenu = (item: KnowledgeItem): boolean =>
+  props.canEdit || Boolean(item.can_reparse) || projectTraceVisible(item) || Boolean(props.traceVisibleIds[item.id]);
+
 </script>
 
 <template>
@@ -273,7 +286,7 @@ const handleAction = (action: 'download' | 'edit' | 'reparse' | 'cancel-parse' |
       <div class="cell cell-name" role="columnheader">{{ t('knowledgeBase.columnName') }}</div>
       <div class="cell cell-tags" role="columnheader">{{ t('knowledgeBase.columnTag') }}</div>
       <div class="cell cell-status" role="columnheader">{{ t('knowledgeBase.columnStatus') }}</div>
-      <div class="cell cell-actions" role="columnheader" v-if="canEdit"></div>
+      <div class="cell cell-actions" role="columnheader" v-if="canEdit || restrictedProject"></div>
     </div>
 
     <div class="doc-list-body" role="rowgroup">
@@ -345,7 +358,8 @@ const handleAction = (action: 'download' | 'edit' | 'reparse' | 'cancel-parse' |
           </template>
         </div>
 
-        <div class="cell cell-actions" role="cell" v-if="canEdit" @click.stop>
+        <div class="cell cell-actions" role="cell" v-if="canEdit || restrictedProject" @click.stop>
+          <template v-if="canShowActionMenu(item)">
           <t-popup :visible="moreOpen === item.id" placement="bottom-right" trigger="click" destroy-on-close overlay-class-name="card-more"
             :on-visible-change="(v: boolean) => onMoreVisible(item.id, v)">
             <button class="row-more-btn" :class="{ active: moreOpen === item.id }" type="button"
@@ -366,7 +380,7 @@ const handleAction = (action: 'download' | 'edit' | 'reparse' | 'cancel-parse' |
 
               <!-- Normal menu -->
               <div v-else-if="moveMenuMode === 'normal'" class="card-menu">
-                <button type="button" class="card-menu-item row-tag-menu-action" @click.stop="moreOpen = null; tagEditorId = item.id">
+                <button v-if="canEdit" type="button" class="card-menu-item row-tag-menu-action" @click.stop="moreOpen = null; tagEditorId = item.id">
                   <t-icon name="discount" class="icon" />
                   <span>{{ t('knowledgeBase.tagEditDialogHeading') }}</span>
                 </button>
@@ -374,7 +388,9 @@ const handleAction = (action: 'download' | 'edit' | 'reparse' | 'cancel-parse' |
                   :item="item"
                   :can-download="canDownload"
                   :can-mutate-knowledge="canMutateKnowledge"
-                  :trace-visible="!!traceVisibleIds[item.id] || (item.parse_status === 'pending' || item.parse_status === 'processing' || item.parse_status === 'finalizing')"
+                  :can-reparse="canEdit || Boolean(item.can_reparse)"
+                  :restricted-project="restrictedProject"
+                  :trace-visible="projectTraceVisible(item) || !!traceVisibleIds[item.id] || (item.parse_status === 'pending' || item.parse_status === 'processing' || item.parse_status === 'finalizing')"
                   @download="handleAction('download', item)"
                   @edit="handleAction('edit', item)"
                   @view-trace="handleAction('view-trace', item)"
@@ -447,6 +463,7 @@ const handleAction = (action: 'download' | 'edit' | 'reparse' | 'cancel-parse' |
               </div>
             </template>
           </t-popup>
+          </template>
         </div>
       </div>
     </div>

@@ -383,6 +383,9 @@ func (s *PixLabWorkbenchService) Authenticate(
 		validated.BindingRevision != session.Principal.BindingRevision {
 		return nil, nil, ctx, workbenchError(http.StatusUnauthorized, "UNAUTHENTICATED", "PixLab principal changed", nil)
 	}
+	if !validated.HasCapability(types.PixLabCapabilityRead) {
+		return nil, nil, ctx, workbenchError(http.StatusForbidden, "PROJECT_FORBIDDEN", "Principal cannot access this project", nil)
+	}
 	session.Principal.Capabilities = validated.Capabilities
 	binding, err := s.resolveBinding(ctx, session.Principal)
 	if err != nil {
@@ -410,6 +413,68 @@ func (s *PixLabWorkbenchService) Authenticate(
 	scoped = context.WithValue(scoped, types.UserIDContextKey, workbenchUserID)
 	scoped = context.WithValue(scoped, types.TenantRoleContextKey, workbenchRole)
 	return &session, binding, scoped, nil
+}
+
+// ResumeSession revalidates an existing HttpOnly workbench session and rotates
+// the in-memory CSRF credential without extending the Redis session lifetime.
+func (s *PixLabWorkbenchService) ResumeSession(
+	ctx context.Context,
+	sessionToken, projectCode string,
+) (string, time.Duration, *types.PixLabWorkbenchSession, *types.PixLabProjectBinding, error) {
+	session, binding, _, err := s.Authenticate(ctx, sessionToken, projectCode, "", false)
+	if err != nil {
+		return "", 0, nil, nil, err
+	}
+
+	remaining, err := s.redis.PTTL(ctx, sessionRedisKey(sessionToken)).Result()
+	if err != nil || remaining <= 0 {
+		return "", 0, nil, nil, workbenchError(
+			http.StatusUnauthorized,
+			"UNAUTHENTICATED",
+			"Workbench session expired",
+			err,
+		)
+	}
+	csrfToken, err := randomToken(32)
+	if err != nil {
+		return "", 0, nil, nil, workbenchError(
+			http.StatusInternalServerError,
+			"WEKNORA_ERROR",
+			"Failed to create CSRF token",
+			err,
+		)
+	}
+	session.CSRFHash = sha256Hex(csrfToken)
+	raw, err := json.Marshal(session)
+	if err != nil {
+		return "", 0, nil, nil, workbenchError(
+			http.StatusInternalServerError,
+			"WEKNORA_ERROR",
+			"Failed to encode workbench session",
+			err,
+		)
+	}
+	result, err := s.redis.SetArgs(ctx, sessionRedisKey(sessionToken), raw, redis.SetArgs{
+		Mode: "XX",
+		TTL:  remaining,
+	}).Result()
+	if errors.Is(err, redis.Nil) || (err == nil && result == "") {
+		return "", 0, nil, nil, workbenchError(
+			http.StatusUnauthorized,
+			"UNAUTHENTICATED",
+			"Workbench session expired",
+			err,
+		)
+	}
+	if err != nil {
+		return "", 0, nil, nil, workbenchError(
+			http.StatusServiceUnavailable,
+			"SESSION_STORE_UNAVAILABLE",
+			"Failed to rotate workbench session",
+			err,
+		)
+	}
+	return csrfToken, remaining, session, binding, nil
 }
 
 func (s *PixLabWorkbenchService) DeleteSession(ctx context.Context, sessionToken string) error {
