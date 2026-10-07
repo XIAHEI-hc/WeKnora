@@ -9,6 +9,7 @@ test('bootstrap message requires the matching nonce and project and a non-empty 
     ticket: 'one-time-ticket', project_code: 'PROJECT_P',
   }
   assert.equal(isBootstrapMessageForProject(valid, 'PROJECT_P', 'nonce-1'), true)
+  assert.equal(isBootstrapMessageForProject({ ...valid, type: 'workbench.bootstrap' }, 'PROJECT_P', 'nonce-1'), true)
   assert.equal(isBootstrapMessageForProject({ ...valid, nonce: 'nonce-2' }, 'PROJECT_P', 'nonce-1'), false)
   assert.equal(isBootstrapMessageForProject({ ...valid, project_code: 'PROJECT_Q' }, 'PROJECT_P', 'nonce-1'), false)
   assert.equal(isBootstrapMessageForProject({ ...valid, ticket: '' }, 'PROJECT_P', 'nonce-1'), false)

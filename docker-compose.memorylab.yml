@@ -1,0 +1,13 @@
+# Optional integration overlay for the MemoryLab MRA native workbench.
+# MemoryLab owns this external network and exposes its backend through the
+# stable `memorylab-backend` alias without publishing a non-loopback host port.
+services:
+  app:
+    networks:
+      WeKnora-network:
+      memorylab-internal:
+
+networks:
+  memorylab-internal:
+    external: true
+    name: ${MEMORYLAB_DOCKER_NETWORK:-memorylab-internal}

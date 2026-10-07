@@ -74,12 +74,12 @@ type pixLabSessionRequest struct {
 }
 
 func (h *PixLabWorkbenchHandler) CreateSession(c *gin.Context) {
-	if !h.requireOrigin(c) {
-		return
-	}
 	var request pixLabSessionRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "Ticket and project_code are required", err))
+		return
+	}
+	if !h.requireOrigin(c, request.ProjectCode) {
 		return
 	}
 	sessionToken, csrfToken, principal, _, err := h.service.ExchangeTicket(
@@ -89,7 +89,7 @@ func (h *PixLabWorkbenchHandler) CreateSession(c *gin.Context) {
 		h.fail(c, err)
 		return
 	}
-	config := h.service.Config()
+	config := h.service.ConfigForProject(request.ProjectCode)
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(
 		appservice.PixLabWorkbenchCookieName,
@@ -112,12 +112,12 @@ type pixLabSessionResumeRequest struct {
 }
 
 func (h *PixLabWorkbenchHandler) ResumeSession(c *gin.Context) {
-	if !h.requireOrigin(c) {
-		return
-	}
 	var request pixLabSessionResumeRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "project_code is required", err))
+		return
+	}
+	if !h.requireOrigin(c, request.ProjectCode) {
 		return
 	}
 	token, cookieErr := c.Cookie(appservice.PixLabWorkbenchCookieName)
@@ -132,7 +132,7 @@ func (h *PixLabWorkbenchHandler) ResumeSession(c *gin.Context) {
 		h.fail(c, err)
 		return
 	}
-	config := h.service.Config()
+	config := h.service.ConfigForProject(request.ProjectCode)
 	maxAge := int((remaining + time.Second - 1) / time.Second)
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(
@@ -153,7 +153,7 @@ func (h *PixLabWorkbenchHandler) ResumeSession(c *gin.Context) {
 }
 
 func (h *PixLabWorkbenchHandler) DeleteSession(c *gin.Context) {
-	if !h.requireOrigin(c) {
+	if !h.requireOrigin(c, "") {
 		return
 	}
 	token, _ := c.Cookie(appservice.PixLabWorkbenchCookieName)
@@ -161,7 +161,10 @@ func (h *PixLabWorkbenchHandler) DeleteSession(c *gin.Context) {
 		h.fail(c, err)
 		return
 	}
-	config := h.service.Config()
+	config, ok := h.service.ConfigForOrigin(c.GetHeader("Origin"))
+	if !ok {
+		config = h.service.Config()
+	}
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(appservice.PixLabWorkbenchCookieName, "", -1, "/api/v1/pixlab-workbench/", "", config.CookieSecure(), true)
 	h.success(c, http.StatusOK, gin.H{"deleted": true})
@@ -169,7 +172,7 @@ func (h *PixLabWorkbenchHandler) DeleteSession(c *gin.Context) {
 
 func (h *PixLabWorkbenchHandler) AuthenticateProject() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !h.requireOrigin(c) {
+		if !h.requireOrigin(c, c.Param("project_code")) {
 			c.Abort()
 			return
 		}
@@ -191,7 +194,7 @@ func (h *PixLabWorkbenchHandler) AuthenticateProject() gin.HandlerFunc {
 		c.Set(pixLabSessionContextKey, session)
 		c.Set(pixLabBindingContextKey, binding)
 		c.Set(types.TenantIDContextKey.String(), binding.TenantID)
-		c.Set(types.UserIDContextKey.String(), "pixlab:"+session.Principal.UserID)
+		c.Set(types.UserIDContextKey.String(), h.service.WorkbenchUserID(session.Principal))
 		c.Request = c.Request.WithContext(scoped)
 		c.Next()
 	}
@@ -449,7 +452,7 @@ func (h *PixLabWorkbenchHandler) UploadDocument(c *gin.Context) {
 	}
 	metadata["pixlab_project_code"] = binding.ProjectCode
 	metadata["pixlab_uploader_user_id"] = session.Principal.UserID
-	metadata["source_principal"] = "pixlab:" + session.Principal.UserID
+	metadata["source_principal"] = h.service.WorkbenchUserID(session.Principal)
 
 	var processOverrides *types.KnowledgeProcessOverrides
 	if raw := c.PostForm("process_config"); raw != "" {
@@ -474,7 +477,7 @@ func (h *PixLabWorkbenchHandler) UploadDocument(c *gin.Context) {
 	}
 	document, err := h.service.KnowledgeService().CreateKnowledgeFromFile(
 		c.Request.Context(), binding.KnowledgeBaseID, file, metadata, enableMultimodel,
-		customFileName, nil, "pixlab-workbench", processOverrides,
+		customFileName, nil, h.service.WorkbenchChannel(binding.ProjectCode), processOverrides,
 	)
 	if err != nil {
 		h.fail(c, mapDocumentError(err))
@@ -702,7 +705,7 @@ func (h *PixLabWorkbenchHandler) CreateChatSession(c *gin.Context) {
 	}
 	projectCode := binding.ProjectCode
 	created, err := h.sessions.CreateSession(c.Request.Context(), &types.Session{
-		TenantID: binding.TenantID, UserID: "pixlab:" + workbenchSession.Principal.UserID,
+		TenantID: binding.TenantID, UserID: h.service.WorkbenchUserID(workbenchSession.Principal),
 		PixLabProjectCode: &projectCode, Title: request.Title,
 		Description: types.SanitizeClientSessionDescription(request.Description, ""),
 	})
@@ -802,7 +805,7 @@ func (h *PixLabWorkbenchHandler) ChatAnswer(c *gin.Context) {
 	}
 	forward := sessionhandler.CreateKnowledgeQARequest{
 		Query: request.Query, KnowledgeBaseIDs: []string{binding.KnowledgeBaseID},
-		AgentID: binding.AgentID, AgentEnabled: true, Channel: "pixlab-workbench",
+		AgentID: binding.AgentID, AgentEnabled: true, Channel: h.service.WorkbenchChannel(binding.ProjectCode),
 		ReasoningEffort: request.ReasoningEffort, DisableTitle: request.DisableTitle,
 	}
 	body, err := json.Marshal(forward)
@@ -864,7 +867,7 @@ func (h *PixLabWorkbenchHandler) watchStreamAuthorization(c *gin.Context) func()
 			case <-requestCtx.Done():
 				return
 			case <-ticker.C:
-				checkTimeout := h.service.Config().RequestTimeout
+				checkTimeout := h.service.ConfigForProject(projectCode).RequestTimeout
 				if checkTimeout <= 0 {
 					checkTimeout = interval
 				}
@@ -1006,17 +1009,25 @@ func (h *PixLabWorkbenchHandler) scope(c *gin.Context) (*types.PixLabWorkbenchSe
 	return session, binding, true
 }
 
-func (h *PixLabWorkbenchHandler) requireOrigin(c *gin.Context) bool {
-	if err := h.service.RequireEnabled(); err != nil {
+func (h *PixLabWorkbenchHandler) requireOrigin(c *gin.Context, projectCode string) bool {
+	origin := strings.TrimRight(strings.TrimSpace(c.GetHeader("Origin")), "/")
+	config := h.service.ConfigForProject(projectCode)
+	if projectCode == "" {
+		var ok bool
+		config, ok = h.service.ConfigForOrigin(origin)
+		if !ok {
+			h.fail(c, appserviceError(http.StatusForbidden, "ORIGIN_FORBIDDEN", "Request origin is not allowed", nil))
+			return false
+		}
+	} else if err := h.service.RequireEnabledForProject(projectCode); err != nil {
 		h.fail(c, err)
 		return false
 	}
-	expected := h.service.Config().PublicOrigin
+	expected := config.PublicOrigin
 	if expected == "" {
-		h.fail(c, appserviceError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "PixLab public origin is not configured", nil))
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "Host public origin is not configured", nil))
 		return false
 	}
-	origin := strings.TrimRight(strings.TrimSpace(c.GetHeader("Origin")), "/")
 	safeMethod := c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead || c.Request.Method == http.MethodOptions
 	if origin == "" && safeMethod {
 		fetchSite := strings.TrimSpace(c.GetHeader("Sec-Fetch-Site"))

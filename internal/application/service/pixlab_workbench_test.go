@@ -225,6 +225,85 @@ func TestPixLabWorkbenchSessionScopesProjectCSRFAndBinding(t *testing.T) {
 	require.Empty(t, mini.Keys())
 }
 
+func TestMemoryLabWorkbenchUsesIndependentBridgeAndUserNamespace(t *testing.T) {
+	t.Parallel()
+	mini := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+
+	binding := &types.PixLabProjectBinding{
+		ProjectCode: "MEMORYLAB_MRA", ProjectName: "MemoryLab MRA", TenantID: 10000,
+		KnowledgeBaseID: "kb-memorylab", AgentID: "builtin-quick-answer",
+		Status: types.PixLabBindingStatusActive, Revision: 1,
+	}
+	pixLabClient := &pixLabPrincipalClientStub{}
+	memoryLabClient := &pixLabPrincipalClientStub{principal: types.PixLabPrincipal{
+		UserID: "memory-user", ProjectCode: "MEMORYLAB_MRA", PixLabSessionID: "memory-session",
+		PermissionVersion: 4, BindingRevision: 1,
+		Capabilities: []string{types.PixLabCapabilityRead, types.PixLabCapabilityChat},
+	}}
+	service := NewPixLabWorkbenchServiceWithConfig(
+		PixLabWorkbenchConfig{
+			Enabled: true, InternalBaseURL: "http://pixlab.test", KeyID: "pix-key", Secret: "pix-secret",
+			PublicOrigin: "http://127.0.0.1:5173", SessionTTL: time.Hour, RequestTimeout: time.Second,
+		},
+		&pixLabWorkbenchRepoStub{binding: binding}, redisClient,
+		&pixLabKBServiceStub{kb: &types.KnowledgeBase{ID: "kb-memorylab", TenantID: 10000}},
+		&pixLabTenantRepoStub{tenant: &types.Tenant{ID: 10000}},
+		&pixLabKnowledgeServiceStub{}, pixLabClient,
+	)
+	service.memoryLabProjectCode = "MEMORYLAB_MRA"
+	service.memoryLabConfig = PixLabWorkbenchConfig{
+		Source: "memorylab", HeaderPrefix: "X-MemoryLab", UserIDPrefix: "memorylab:",
+		Channel: "memorylab-workbench", Enabled: true, InternalBaseURL: "http://memorylab.test",
+		KeyID: "memory-key", Secret: "memory-secret", PublicOrigin: "http://127.0.0.1:7891",
+		SessionTTL: time.Hour, RequestTimeout: time.Second,
+	}
+	service.memoryLabPrincipal = memoryLabClient
+
+	sessionToken, csrfToken, _, _, err := service.ExchangeTicket(
+		context.Background(), "memory-ticket", "MEMORYLAB_MRA",
+	)
+	require.NoError(t, err)
+	require.Equal(t, 0, pixLabClient.redeemCalls)
+	require.Equal(t, 1, memoryLabClient.redeemCalls)
+
+	session, _, scoped, err := service.Authenticate(
+		context.Background(), sessionToken, "MEMORYLAB_MRA", csrfToken, true,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "memorylab:memory-user", service.WorkbenchUserID(session.Principal))
+	userID, ok := types.UserIDFromContext(scoped)
+	require.True(t, ok)
+	require.Equal(t, "memorylab:memory-user", userID)
+	require.Equal(t, "memorylab-workbench", service.WorkbenchChannel("MEMORYLAB_MRA"))
+	require.Equal(t, 0, pixLabClient.validateCalls)
+	require.Equal(t, 1, memoryLabClient.validateCalls)
+}
+
+func TestMemoryLabBackchannelUsesMemoryLabHeaders(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "memory-key", request.Header.Get("X-MemoryLab-Key-Id"))
+		require.Empty(t, request.Header.Get("X-PixLab-Key-Id"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"user_id":"u1","project_code":"MEMORYLAB_MRA","pixlab_session_id":"s1","permission_version":1,"binding_revision":1,"capabilities":["read"]}}`)
+	}))
+	defer server.Close()
+
+	client := &pixLabHTTPClient{
+		config: PixLabWorkbenchConfig{
+			Source: "memorylab", HeaderPrefix: "X-MemoryLab", Enabled: true,
+			InternalBaseURL: server.URL, KeyID: "memory-key", Secret: "memory-secret",
+			PublicOrigin: "http://127.0.0.1:7891", SessionTTL: time.Hour, RequestTimeout: time.Second,
+		},
+		client: server.Client(), now: time.Now,
+	}
+	principal, err := client.Redeem(context.Background(), "ticket", "MEMORYLAB_MRA")
+	require.NoError(t, err)
+	require.Equal(t, "MEMORYLAB_MRA", principal.ProjectCode)
+}
+
 func TestPixLabBackchannelErrorShapeAcceptsFastAPIDetail(t *testing.T) {
 	t.Parallel()
 	err := decodePixLabError(http.StatusUnauthorized, []byte(`{"detail":{"code":"UNAUTHENTICATED","message":"expired"}}`))

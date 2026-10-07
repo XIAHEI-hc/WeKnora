@@ -48,6 +48,11 @@ func TestSanitizeBody(t *testing.T) {
 			want: `{"password":"***","token":"***"}`,
 		},
 		{
+			name: "workbench CSRF token",
+			in:   `{"data":{"csrf_token":"workbench-secret","expires_in":3600}}`,
+			want: `{"data":{"csrf_token":"***","expires_in":3600}}`,
+		},
+		{
 			name: "sandbox terminal handshake ticket in JSON body",
 			in:   `{"success":true,"data":{"ticket":"eyJhbGciOiJIUzI1NiJ9.payload.signature","expires_in":120}}`,
 			want: `{"success":true,"data":{"ticket":"***","expires_in":120}}`,

@@ -38,7 +38,7 @@ provide(PIXLAB_PROJECT_CONTEXT, context)
 
 function friendlyError(cause: unknown) {
   if (cause instanceof WorkbenchApiError) {
-    if (cause.code === 'UNAUTHENTICATED') return '登录状态已失效，请返回 PixLab 重新进入。'
+    if (cause.code === 'UNAUTHENTICATED') return '登录状态已失效，请返回宿主平台重新进入。'
     if (cause.code === 'PROJECT_FORBIDDEN') return '你已没有该项目的访问权限。'
     if (cause.code === 'BINDING_NOT_READY' || cause.code === 'BINDING_CHANGED') return '项目知识库尚未准备完成。'
     return cause.message

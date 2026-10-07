@@ -52,6 +52,10 @@ func workbenchError(status int, code, message string, cause error) error {
 }
 
 type PixLabWorkbenchConfig struct {
+	Source          string
+	HeaderPrefix    string
+	UserIDPrefix    string
+	Channel         string
 	Enabled         bool
 	InternalBaseURL string
 	KeyID           string
@@ -63,6 +67,10 @@ type PixLabWorkbenchConfig struct {
 
 func LoadPixLabWorkbenchConfig() PixLabWorkbenchConfig {
 	return PixLabWorkbenchConfig{
+		Source:          "pixlab",
+		HeaderPrefix:    "X-PixLab",
+		UserIDPrefix:    "pixlab:",
+		Channel:         "pixlab-workbench",
 		Enabled:         parseEnvBool("PIXLAB_BRIDGE_ENABLED", false),
 		InternalBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("PIXLAB_INTERNAL_BASE_URL")), "/"),
 		KeyID:           strings.TrimSpace(os.Getenv("PIXLAB_BACKCHANNEL_KEY_ID")),
@@ -71,6 +79,54 @@ func LoadPixLabWorkbenchConfig() PixLabWorkbenchConfig {
 		SessionTTL:      parseEnvDuration("PIXLAB_WORKBENCH_SESSION_TTL", time.Hour),
 		RequestTimeout:  parseEnvDuration("PIXLAB_BACKCHANNEL_TIMEOUT", 10*time.Second),
 	}
+}
+
+func LoadMemoryLabWorkbenchConfig() (string, PixLabWorkbenchConfig) {
+	projectCode := strings.TrimSpace(os.Getenv("MEMORYLAB_PROJECT_CODE"))
+	if projectCode == "" {
+		projectCode = "MEMORYLAB_MRA"
+	}
+	return projectCode, PixLabWorkbenchConfig{
+		Source:          "memorylab",
+		HeaderPrefix:    "X-MemoryLab",
+		UserIDPrefix:    "memorylab:",
+		Channel:         "memorylab-workbench",
+		Enabled:         parseEnvBool("MEMORYLAB_BRIDGE_ENABLED", false),
+		InternalBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORYLAB_INTERNAL_BASE_URL")), "/"),
+		KeyID:           strings.TrimSpace(os.Getenv("MEMORYLAB_BACKCHANNEL_KEY_ID")),
+		Secret:          os.Getenv("MEMORYLAB_BACKCHANNEL_SECRET"),
+		PublicOrigin:    strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORYLAB_PUBLIC_ORIGIN")), "/"),
+		SessionTTL:      parseEnvDuration("MEMORYLAB_WORKBENCH_SESSION_TTL", time.Hour),
+		RequestTimeout:  parseEnvDuration("MEMORYLAB_BACKCHANNEL_TIMEOUT", 10*time.Second),
+	}
+}
+
+func (c PixLabWorkbenchConfig) normalizedSource() string {
+	if c.Source == "" {
+		return "pixlab"
+	}
+	return c.Source
+}
+
+func (c PixLabWorkbenchConfig) normalizedHeaderPrefix() string {
+	if c.HeaderPrefix == "" {
+		return "X-PixLab"
+	}
+	return c.HeaderPrefix
+}
+
+func (c PixLabWorkbenchConfig) normalizedUserIDPrefix() string {
+	if c.UserIDPrefix == "" {
+		return "pixlab:"
+	}
+	return c.UserIDPrefix
+}
+
+func (c PixLabWorkbenchConfig) normalizedChannel() string {
+	if c.Channel == "" {
+		return "pixlab-workbench"
+	}
+	return c.Channel
 }
 
 func parseEnvBool(name string, fallback bool) bool {
@@ -101,15 +157,15 @@ func (c PixLabWorkbenchConfig) Validate() error {
 		return workbenchError(http.StatusNotFound, "WORKBENCH_DISABLED", "Project knowledge workbench is disabled", nil)
 	}
 	if c.InternalBaseURL == "" || c.KeyID == "" || c.Secret == "" || c.PublicOrigin == "" {
-		return workbenchError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "PixLab bridge is not configured", nil)
+		return workbenchError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "Host bridge is not configured", nil)
 	}
 	internalURL, err := url.Parse(c.InternalBaseURL)
 	if err != nil || internalURL.Scheme == "" || internalURL.Host == "" {
-		return workbenchError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "PixLab internal URL is invalid", err)
+		return workbenchError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "Host internal URL is invalid", err)
 	}
 	publicURL, err := url.Parse(c.PublicOrigin)
 	if err != nil || publicURL.Scheme == "" || publicURL.Host == "" || publicURL.Path != "" {
-		return workbenchError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "PixLab public origin is invalid", err)
+		return workbenchError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "Host public origin is invalid", err)
 	}
 	if c.SessionTTL < time.Minute {
 		return workbenchError(http.StatusServiceUnavailable, "BACKCHANNEL_NOT_CONFIGURED", "Workbench session TTL must be at least one minute", nil)
@@ -185,10 +241,11 @@ func (c *pixLabHTTPClient) post(ctx context.Context, path string, payload any) (
 		return nil, workbenchError(http.StatusBadGateway, "PIXLAB_UNAVAILABLE", "Failed to create PixLab request", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-PixLab-Key-Id", c.config.KeyID)
-	req.Header.Set("X-PixLab-Timestamp", timestamp)
-	req.Header.Set("X-PixLab-Nonce", nonce)
-	req.Header.Set("X-PixLab-Signature", hex.EncodeToString(signer.Sum(nil)))
+	headerPrefix := c.config.normalizedHeaderPrefix()
+	req.Header.Set(headerPrefix+"-Key-Id", c.config.KeyID)
+	req.Header.Set(headerPrefix+"-Timestamp", timestamp)
+	req.Header.Set(headerPrefix+"-Nonce", nonce)
+	req.Header.Set(headerPrefix+"-Signature", hex.EncodeToString(signer.Sum(nil)))
 
 	response, err := c.client.Do(req)
 	if err != nil {
@@ -240,13 +297,16 @@ func decodePixLabError(status int, body []byte) error {
 }
 
 type PixLabWorkbenchService struct {
-	config     PixLabWorkbenchConfig
-	repository interfaces.PixLabWorkbenchRepository
-	redis      *redis.Client
-	kbService  interfaces.KnowledgeBaseService
-	tenantRepo interfaces.TenantRepository
-	knowledge  interfaces.KnowledgeService
-	principal  PixLabPrincipalClient
+	config               PixLabWorkbenchConfig
+	memoryLabProjectCode string
+	memoryLabConfig      PixLabWorkbenchConfig
+	repository           interfaces.PixLabWorkbenchRepository
+	redis                *redis.Client
+	kbService            interfaces.KnowledgeBaseService
+	tenantRepo           interfaces.TenantRepository
+	knowledge            interfaces.KnowledgeService
+	principal            PixLabPrincipalClient
+	memoryLabPrincipal   PixLabPrincipalClient
 }
 
 func NewPixLabWorkbenchService(
@@ -257,7 +317,12 @@ func NewPixLabWorkbenchService(
 	knowledge interfaces.KnowledgeService,
 ) *PixLabWorkbenchService {
 	config := LoadPixLabWorkbenchConfig()
-	return NewPixLabWorkbenchServiceWithConfig(config, repository, redisClient, kbService, tenantRepo, knowledge, nil)
+	service := NewPixLabWorkbenchServiceWithConfig(
+		config, repository, redisClient, kbService, tenantRepo, knowledge, nil,
+	)
+	service.memoryLabProjectCode, service.memoryLabConfig = LoadMemoryLabWorkbenchConfig()
+	service.memoryLabPrincipal = newPixLabHTTPClient(service.memoryLabConfig)
+	return service
 }
 
 func NewPixLabWorkbenchServiceWithConfig(
@@ -280,8 +345,50 @@ func NewPixLabWorkbenchServiceWithConfig(
 
 func (s *PixLabWorkbenchService) Config() PixLabWorkbenchConfig { return s.config }
 
+func (s *PixLabWorkbenchService) ConfigForProject(projectCode string) PixLabWorkbenchConfig {
+	if s.memoryLabProjectCode != "" && projectCode == s.memoryLabProjectCode {
+		return s.memoryLabConfig
+	}
+	return s.config
+}
+
+func (s *PixLabWorkbenchService) principalForProject(projectCode string) PixLabPrincipalClient {
+	if s.memoryLabProjectCode != "" && projectCode == s.memoryLabProjectCode {
+		return s.memoryLabPrincipal
+	}
+	return s.principal
+}
+
+func (s *PixLabWorkbenchService) WorkbenchUserID(principal types.PixLabPrincipal) string {
+	return s.ConfigForProject(principal.ProjectCode).normalizedUserIDPrefix() + principal.UserID
+}
+
+func (s *PixLabWorkbenchService) WorkbenchChannel(projectCode string) string {
+	return s.ConfigForProject(projectCode).normalizedChannel()
+}
+
+func (s *PixLabWorkbenchService) ConfigForOrigin(origin string) (PixLabWorkbenchConfig, bool) {
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	for _, config := range []PixLabWorkbenchConfig{s.config, s.memoryLabConfig} {
+		if config.Enabled && config.PublicOrigin != "" && hmac.Equal([]byte(origin), []byte(config.PublicOrigin)) {
+			return config, true
+		}
+	}
+	return PixLabWorkbenchConfig{}, false
+}
+
 func (s *PixLabWorkbenchService) RequireEnabled() error {
 	if err := s.config.Validate(); err != nil {
+		return err
+	}
+	if s.redis == nil {
+		return workbenchError(http.StatusServiceUnavailable, "SESSION_STORE_UNAVAILABLE", "Workbench session storage is unavailable", nil)
+	}
+	return nil
+}
+
+func (s *PixLabWorkbenchService) RequireEnabledForProject(projectCode string) error {
+	if err := s.ConfigForProject(projectCode).Validate(); err != nil {
 		return err
 	}
 	if s.redis == nil {
@@ -294,17 +401,17 @@ func (s *PixLabWorkbenchService) ExchangeTicket(
 	ctx context.Context,
 	ticket, projectCode string,
 ) (string, string, *types.PixLabPrincipal, *types.PixLabProjectBinding, error) {
-	if err := s.RequireEnabled(); err != nil {
-		return "", "", nil, nil, err
-	}
 	projectCode, err := normalizeProjectCode(projectCode)
 	if err != nil {
+		return "", "", nil, nil, err
+	}
+	if err := s.RequireEnabledForProject(projectCode); err != nil {
 		return "", "", nil, nil, err
 	}
 	if strings.TrimSpace(ticket) == "" {
 		return "", "", nil, nil, workbenchError(http.StatusBadRequest, "TICKET_REQUIRED", "Workbench ticket is required", nil)
 	}
-	principal, err := s.principal.Redeem(ctx, ticket, projectCode)
+	principal, err := s.principalForProject(projectCode).Redeem(ctx, ticket, projectCode)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
@@ -335,7 +442,8 @@ func (s *PixLabWorkbenchService) ExchangeTicket(
 	if err != nil {
 		return "", "", nil, nil, workbenchError(http.StatusInternalServerError, "WEKNORA_ERROR", "Failed to encode workbench session", err)
 	}
-	if err := s.redis.Set(ctx, sessionRedisKey(sessionToken), raw, s.config.SessionTTL).Err(); err != nil {
+	config := s.ConfigForProject(projectCode)
+	if err := s.redis.Set(ctx, sessionRedisKey(sessionToken), raw, config.SessionTTL).Err(); err != nil {
 		return "", "", nil, nil, workbenchError(http.StatusServiceUnavailable, "SESSION_STORE_UNAVAILABLE", "Failed to persist workbench session", err)
 	}
 	return sessionToken, csrfToken, principal, binding, nil
@@ -346,11 +454,11 @@ func (s *PixLabWorkbenchService) Authenticate(
 	sessionToken, projectCode, csrfToken string,
 	requireCSRF bool,
 ) (*types.PixLabWorkbenchSession, *types.PixLabProjectBinding, context.Context, error) {
-	if err := s.RequireEnabled(); err != nil {
-		return nil, nil, ctx, err
-	}
 	projectCode, err := normalizeProjectCode(projectCode)
 	if err != nil {
+		return nil, nil, ctx, err
+	}
+	if err := s.RequireEnabledForProject(projectCode); err != nil {
 		return nil, nil, ctx, err
 	}
 	if strings.TrimSpace(sessionToken) == "" {
@@ -373,7 +481,7 @@ func (s *PixLabWorkbenchService) Authenticate(
 	if requireCSRF && !hmac.Equal([]byte(session.CSRFHash), []byte(sha256Hex(csrfToken))) {
 		return nil, nil, ctx, workbenchError(http.StatusForbidden, "CSRF_FAILED", "CSRF validation failed", nil)
 	}
-	validated, err := s.principal.Validate(ctx, session.Principal)
+	validated, err := s.principalForProject(projectCode).Validate(ctx, session.Principal)
 	if err != nil {
 		return nil, nil, ctx, err
 	}
@@ -381,7 +489,7 @@ func (s *PixLabWorkbenchService) Authenticate(
 		validated.PixLabSessionID != session.Principal.PixLabSessionID ||
 		validated.PermissionVersion != session.Principal.PermissionVersion ||
 		validated.BindingRevision != session.Principal.BindingRevision {
-		return nil, nil, ctx, workbenchError(http.StatusUnauthorized, "UNAUTHENTICATED", "PixLab principal changed", nil)
+		return nil, nil, ctx, workbenchError(http.StatusUnauthorized, "UNAUTHENTICATED", "Host principal changed", nil)
 	}
 	if !validated.HasCapability(types.PixLabCapabilityRead) {
 		return nil, nil, ctx, workbenchError(http.StatusForbidden, "PROJECT_FORBIDDEN", "Principal cannot access this project", nil)
@@ -398,7 +506,7 @@ func (s *PixLabWorkbenchService) Authenticate(
 	if err != nil || tenant == nil || tenant.ID != binding.TenantID {
 		return nil, nil, ctx, workbenchError(http.StatusConflict, "BINDING_NOT_READY", "Bound tenant is unavailable", err)
 	}
-	workbenchUserID := "pixlab:" + session.Principal.UserID
+	workbenchUserID := s.WorkbenchUserID(session.Principal)
 	workbenchRole := types.TenantRoleViewer
 	if session.Principal.HasCapability(types.PixLabCapabilityUpload) {
 		workbenchRole = types.TenantRoleContributor
@@ -491,9 +599,6 @@ func (s *PixLabWorkbenchService) DeleteAuthenticatedSession(
 	ctx context.Context,
 	sessionToken, csrfToken string,
 ) error {
-	if err := s.RequireEnabled(); err != nil {
-		return err
-	}
 	if strings.TrimSpace(sessionToken) == "" {
 		return workbenchError(http.StatusUnauthorized, "UNAUTHENTICATED", "Workbench session is missing", nil)
 	}
