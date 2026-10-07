@@ -85,6 +85,7 @@ import { useMarqueeSelect } from '@/hooks/useMarqueeSelect';
 import type { ParserEngineInfo } from '@/api/system';
 import { getKnowledgeBaseById } from '@/api/knowledge-base/index';
 import { getActiveProjectContext } from '@/pixlab-workbench/context';
+import { shouldReloadDocumentsForTagChange } from './projectDocumentLoadPolicy';
 const props = withDefaults(defineProps<{
   pixlabProject?: boolean;
   knowledgeBaseId?: string;
@@ -1069,6 +1070,8 @@ const onTagCatalogChanged = (payload?: { deletedTagId?: string }) => {
   void loadKnowledgeFiles(kbId.value);
 };
 
+let resettingTagsForKnowledgeBase = false;
+
 const loadKnowledgeBaseInfo = async (targetKbId: string, force = false) => {
   if (!targetKbId) {
     kbInfo.value = null;
@@ -1084,6 +1087,7 @@ const loadKnowledgeBaseInfo = async (targetKbId: string, force = false) => {
     if (!isCurrentKb(targetKbId)) return;
 
     kbInfo.value = data;
+    resettingTagsForKnowledgeBase = true;
     selectedTagIds.value = [];
     selectedTagNames.value = {};
     uiStore.clearSelectedTagIds();
@@ -1098,7 +1102,10 @@ const loadKnowledgeBaseInfo = async (targetKbId: string, force = false) => {
       folderTree.value = null;
     }
     loadTags(targetKbId, true);
+    await nextTick();
+    resettingTagsForKnowledgeBase = false;
   } catch (error) {
+    resettingTagsForKnowledgeBase = false;
     if (!isCurrentKb(targetKbId)) return;
 
     console.error('Failed to load knowledge base info:', error);
@@ -1186,7 +1193,7 @@ watch(() => kbId.value, (newKbId, oldKbId) => {
 }, { immediate: true });
 
 watch(selectedTagIds, (newVal, oldVal) => {
-  if (oldVal === undefined) return;
+  if (!shouldReloadDocumentsForTagChange(newVal, oldVal, resettingTagsForKnowledgeBase)) return;
   if (kbId.value) {
     loadKnowledgeFiles(kbId.value);
   }

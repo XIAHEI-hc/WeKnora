@@ -21,6 +21,11 @@ import {
 } from './api'
 import { createBootstrapBridge, notifyParent, type PixLabBootstrapMessage } from './bridge'
 import { PIXLAB_PROJECT_CONTEXT, setActiveProjectContext } from './context'
+import {
+  forgetWorkbenchSession,
+  hasWorkbenchSessionHint,
+  rememberWorkbenchSession,
+} from './sessionResumeHint'
 
 const route = useRoute()
 const projectCode = String(route.params.projectCode || '')
@@ -47,6 +52,7 @@ async function bootstrap(message: PixLabBootstrapMessage) {
   error.value = ''
   try {
     await createWorkbenchSession(message.ticket, projectCode)
+    rememberWorkbenchSession(projectCode)
     context.value = await getContext(projectCode)
     setActiveProjectContext(context.value)
     phase.value = 'ready'
@@ -64,10 +70,16 @@ async function bootstrap(message: PixLabBootstrapMessage) {
 
 async function start() {
   if (!bridge) return
+  if (!hasWorkbenchSessionHint(projectCode)) {
+    phase.value = 'waiting'
+    bridge.announceReady()
+    return
+  }
   phase.value = 'loading'
   try {
     const resumed = await resumeWorkbenchSession(projectCode)
     if (!resumed.resumed || resumed.project_code !== projectCode || !resumed.csrf_token) {
+      forgetWorkbenchSession(projectCode)
       phase.value = 'waiting'
       bridge.announceReady()
       return
@@ -78,6 +90,7 @@ async function start() {
     notifyParent('wk-pixlab.authenticated', bridge.nonce)
   } catch {
     clearWorkbenchSession()
+    forgetWorkbenchSession(projectCode)
     phase.value = 'waiting'
     bridge.announceReady()
   }
