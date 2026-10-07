@@ -1,5 +1,10 @@
 # PixLab native workbench deployment
 
+PixLab is one registered host of WeKnora's multi-platform native project
+workbench, not the owner of the embedding capability. Read the
+[multi-platform embedding architecture](./03-multi-platform-embedding.md)
+before this host-specific deployment guide.
+
 The PixLab workbench is served from the same public origin as PixLab. PixLab's
 gateway forwards only these two path prefixes to WeKnora:
 
@@ -8,6 +13,22 @@ gateway forwards only these two path prefixes to WeKnora:
 
 The ordinary WeKnora `/api/v1/*` surface must not be exposed through the
 PixLab gateway.
+
+## Project and knowledge scope
+
+Each PixLab business project resolves to a server-controlled WeKnora binding.
+The binding fixes `tenant_id`, `knowledge_base_id`, `agent_id`, status and
+revision. The browser may select only a PixLab project returned by PixLab's
+authorization service; it cannot supply or override the knowledge base or
+agent.
+
+The verified CIS project `WK-E2E-20261005` is bound to the CIS knowledge base.
+That binding is independent from MemoryLab's `MEMORYLAB_MRA` binding. Questions
+asked from PixLab must not retrieve or cite MemoryLab-only documents.
+
+PixLab uses the `X-PixLab-*` backchannel headers, the `pixlab:` WeKnora user
+namespace and the `pixlab-workbench` channel. These values are host-specific
+and must not be reused by another platform.
 
 ## Verified release
 

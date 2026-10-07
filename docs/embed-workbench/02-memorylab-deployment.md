@@ -1,5 +1,10 @@
 # MemoryLab MRA native workbench deployment
 
+MemoryLab is an independent registered host of WeKnora's multi-platform native
+project workbench. Read the
+[multi-platform embedding architecture](./03-multi-platform-embedding.md)
+before this host-specific deployment guide.
+
 MemoryLab reuses the same constrained native workbench surface as PixLab while
 keeping a separate host bridge, user namespace, project binding, and knowledge
 scope. The browser sees the WeKnora UI through MemoryLab's own origin and never
@@ -20,6 +25,19 @@ the native workbench bundle. MemoryLab identity is selected server-side by the
 fixed `MEMORYLAB_PROJECT_CODE`; it uses `X-MemoryLab-*` HMAC headers,
 `memorylab:` user IDs, and the `memorylab-workbench` channel. It does not call
 the PixLab authorization bridge.
+
+## Project and knowledge scope
+
+`MEMORYLAB_MRA` is the MemoryLab service project, not a shared cross-platform
+knowledge pool. Its server-side binding fixes the MemoryLab tenant, the
+`memorylab` knowledge base and the configured Agent. All document, chunk,
+preview, citation, upload and chat requests are constrained to that binding.
+
+MemoryLab uses `X-MemoryLab-*`, the `memorylab:` user namespace and the
+`memorylab-workbench` channel. It must not reuse PixLab credentials,
+`pixlab:` users or the CIS knowledge-base binding. A CIS-only question returning
+no supporting evidence in MemoryLab is an expected and required isolation
+result.
 
 ## Environment contract
 
