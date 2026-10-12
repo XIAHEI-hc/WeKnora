@@ -1,3 +1,5 @@
+import { generateUUID } from '../utils/uuid'
+
 export interface PixLabBootstrapMessage {
   type: 'pixlab.bootstrap' | 'workbench.bootstrap'
   version: 1
@@ -25,7 +27,7 @@ export function createBootstrapBridge(
   projectCode: string,
   onBootstrap: (message: PixLabBootstrapMessage) => void,
 ) {
-  const nonce = crypto.randomUUID()
+  const nonce = generateUUID()
   const targetOrigin = window.location.origin
 
   const receive = (event: MessageEvent) => {
