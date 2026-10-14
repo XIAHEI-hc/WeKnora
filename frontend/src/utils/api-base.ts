@@ -4,6 +4,13 @@ export function getApiBaseUrl(): string {
   // this · axios hits `/api/v1/...` at LocalHub root · gets 404 "Cannot
   // POST". Strip trailing slash so axios doesn't produce `/app/weknora//api/v1/...`.
   // See: plugins/weknora/patches/api-base-baseurl.patch
-  const base = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
+  const configuredBase = import.meta.env.BASE_URL || '/';
+  // The embedded workbench is served under /weknora-workbench/, but its API
+  // proxy still lives at the host root (/api/v1). Axios otherwise prefixes
+  // every Wiki/KB request with /weknora-workbench and those requests never
+  // reach the workbench API proxy.
+  const base = configuredBase.includes('/weknora-workbench')
+    ? '/'
+    : configuredBase.replace(/\/+$/, '');
   return base;
 }

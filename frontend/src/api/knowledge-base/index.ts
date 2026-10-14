@@ -326,8 +326,11 @@ export function getKnowledgeBaseById(id: string, options?: { agent_id?: string; 
         indexing_strategy: {
           vector_enabled: true,
           keyword_enabled: true,
-          wiki_enabled: false,
-          graph_enabled: false,
+          // The PixLab binding points at the native wiki/graph knowledge base.
+          // Preserve those capabilities so `?tab=graph` can render the
+          // existing KnowledgeBase/WikiBrowser flow inside the workbench.
+          wiki_enabled: true,
+          graph_enabled: true,
         },
       },
     });

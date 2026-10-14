@@ -36,6 +36,7 @@ const (
 
 type PixLabWorkbenchHandler struct {
 	service                          *appservice.PixLabWorkbenchService
+	wikiService                      interfaces.WikiPageService
 	sessions                         interfaces.SessionService
 	messages                         interfaces.MessageService
 	chunks                           interfaces.ChunkService
@@ -55,6 +56,7 @@ func NewPixLabWorkbenchHandler(service *appservice.PixLabWorkbenchService) *PixL
 // root. The small constructor above stays available for focused document tests.
 func NewPixLabWorkbenchHandlerWithDependencies(
 	service *appservice.PixLabWorkbenchService,
+	wikiService interfaces.WikiPageService,
 	sessions interfaces.SessionService,
 	messages interfaces.MessageService,
 	chunks interfaces.ChunkService,
@@ -62,7 +64,7 @@ func NewPixLabWorkbenchHandlerWithDependencies(
 	spanRepo repository.KnowledgeSpanRepository,
 ) *PixLabWorkbenchHandler {
 	return &PixLabWorkbenchHandler{
-		service: service, sessions: sessions, messages: messages, chunks: chunks,
+		service: service, wikiService: wikiService, sessions: sessions, messages: messages, chunks: chunks,
 		sessionHandler: sessionHandler, spanRepo: spanRepo,
 		streamAuthorizationCheckInterval: pixLabStreamAuthorizationCheckInterval,
 	}
@@ -224,6 +226,208 @@ func (h *PixLabWorkbenchHandler) Context(c *gin.Context) {
 			"parser": "ready", "retrieval": "ready", "chat": "ready",
 		},
 	})
+}
+
+// GetWikiGraph exposes the native wiki link graph inside the project binding.
+// The knowledge-base ID is deliberately taken from the server-side binding so
+// a workbench client cannot use this route to read another project's KB.
+func (h *PixLabWorkbenchHandler) GetWikiGraph(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok {
+		return
+	}
+	if h.wikiService == nil {
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "WIKI_UNAVAILABLE", "Wiki service is unavailable", nil))
+		return
+	}
+	mode := strings.TrimSpace(c.Query("mode"))
+	if mode == "" {
+		mode = types.WikiGraphModeOverview
+	}
+	if mode != types.WikiGraphModeOverview && mode != types.WikiGraphModeEgo {
+		h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "mode must be 'overview' or 'ego'", nil))
+		return
+	}
+	center := strings.TrimSpace(c.Query("center"))
+	if mode == types.WikiGraphModeEgo && center == "" {
+		h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "center is required when mode=ego", nil))
+		return
+	}
+	depth := parseBoundedInt(c.Query("depth"), 1, 1, 3)
+	limit := parseBoundedInt(c.Query("limit"), 500, 1, 2000)
+	var pageTypes []string
+	for _, value := range strings.Split(strings.TrimSpace(c.Query("types")), ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			pageTypes = append(pageTypes, value)
+		}
+	}
+	graph, err := h.wikiService.GetGraph(c.Request.Context(), &types.WikiGraphRequest{
+		KnowledgeBaseID: binding.KnowledgeBaseID, Mode: mode, Center: center,
+		Depth: depth, Types: pageTypes, Limit: limit,
+	})
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	h.success(c, http.StatusOK, graph)
+}
+
+// ListWikiPages exposes the paginated Wiki directory inside the project
+// binding. The knowledge-base ID comes from the server-side binding so the
+// embedded client cannot switch the read to another knowledge base.
+func (h *PixLabWorkbenchHandler) ListWikiPages(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok {
+		return
+	}
+	if h.wikiService == nil {
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "WIKI_UNAVAILABLE", "Wiki service is unavailable", nil))
+		return
+	}
+	page := parseBoundedInt(c.Query("page"), 1, 1, 1_000_000)
+	pageSize := parseBoundedInt(c.Query("page_size"), 20, 1, 200)
+	var folderID *string
+	if raw, present := c.GetQuery("folder_id"); present {
+		value := strings.TrimSpace(raw)
+		folderID = &value
+	}
+	var categoryDepth *int
+	if raw := strings.TrimSpace(c.Query("category_depth")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value >= 0 {
+			categoryDepth = &value
+		}
+	}
+	req := &types.WikiPageListRequest{
+		KnowledgeBaseID: binding.KnowledgeBaseID,
+		PageType:        strings.TrimSpace(c.Query("page_type")),
+		Status:          strings.TrimSpace(c.Query("status")),
+		Query:           strings.TrimSpace(c.Query("query")),
+		FolderID:        folderID,
+		CategoryPath:    types.StringArray(parseWikiCategoryPath(c.Query("category_path"))),
+		CategoryDepth:   categoryDepth,
+		Page:            page,
+		PageSize:        pageSize,
+		SortBy:          strings.TrimSpace(c.DefaultQuery("sort_by", "updated_at")),
+		SortOrder:       strings.TrimSpace(c.DefaultQuery("sort_order", "desc")),
+	}
+	result, err := h.wikiService.ListPages(c.Request.Context(), req)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	h.success(c, http.StatusOK, result)
+}
+
+// ListWikiFolders exposes the direct Wiki folder children for the project
+// binding, including recursive page counts used by the sidebar tree.
+func (h *PixLabWorkbenchHandler) ListWikiFolders(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok {
+		return
+	}
+	if h.wikiService == nil {
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "WIKI_UNAVAILABLE", "Wiki service is unavailable", nil))
+		return
+	}
+	parentID := strings.TrimSpace(c.Query("parent_id"))
+	folders, err := h.wikiService.ListChildFolders(
+		c.Request.Context(), binding.KnowledgeBaseID, parentID,
+		types.SplitWikiPageTypes(c.Query("page_types")),
+	)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	if folders == nil {
+		folders = []types.WikiFolderNode{}
+	}
+	h.success(c, http.StatusOK, types.WikiFolderListResponse{ParentID: parentID, Folders: folders})
+}
+
+func (h *PixLabWorkbenchHandler) GetWikiStats(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok {
+		return
+	}
+	if h.wikiService == nil {
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "WIKI_UNAVAILABLE", "Wiki service is unavailable", nil))
+		return
+	}
+	stats, err := h.wikiService.GetStats(c.Request.Context(), binding.KnowledgeBaseID)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	h.success(c, http.StatusOK, stats)
+}
+
+func (h *PixLabWorkbenchHandler) GetWikiIndex(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok {
+		return
+	}
+	if h.wikiService == nil {
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "WIKI_UNAVAILABLE", "Wiki service is unavailable", nil))
+		return
+	}
+	var pageTypes []string
+	for _, value := range strings.Split(strings.TrimSpace(c.Query("types")), ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			pageTypes = append(pageTypes, value)
+		}
+	}
+	limit := parseBoundedInt(c.Query("limit"), 50, 1, 200)
+	index, err := h.wikiService.GetIndexView(c.Request.Context(), binding.KnowledgeBaseID, pageTypes, limit, c.Query("cursor"))
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	h.success(c, http.StatusOK, index)
+}
+
+func (h *PixLabWorkbenchHandler) GetWikiPage(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok {
+		return
+	}
+	if h.wikiService == nil {
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "WIKI_UNAVAILABLE", "Wiki service is unavailable", nil))
+		return
+	}
+	slug := strings.TrimPrefix(c.Param("slug"), "/")
+	if slug == "" {
+		h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "Page slug is required", nil))
+		return
+	}
+	page, err := h.wikiService.GetPageBySlug(c.Request.Context(), binding.KnowledgeBaseID, slug)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	h.success(c, http.StatusOK, page)
+}
+
+func (h *PixLabWorkbenchHandler) SearchWikiPages(c *gin.Context) {
+	_, binding, ok := h.scope(c)
+	if !ok {
+		return
+	}
+	if h.wikiService == nil {
+		h.fail(c, appserviceError(http.StatusServiceUnavailable, "WIKI_UNAVAILABLE", "Wiki service is unavailable", nil))
+		return
+	}
+	query := strings.TrimSpace(c.Query("q"))
+	if query == "" {
+		h.fail(c, appserviceError(http.StatusBadRequest, "INVALID_REQUEST", "Search query 'q' is required", nil))
+		return
+	}
+	limit := parseBoundedInt(c.Query("limit"), 10, 1, 100)
+	pages, err := h.wikiService.SearchPages(c.Request.Context(), binding.KnowledgeBaseID, query, limit)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	h.success(c, http.StatusOK, gin.H{"pages": pages})
 }
 
 func (h *PixLabWorkbenchHandler) ListFolders(c *gin.Context) {

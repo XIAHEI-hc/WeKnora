@@ -33,6 +33,7 @@ const phase = ref<'waiting' | 'loading' | 'ready' | 'error'>('waiting')
 const error = ref('')
 const context = ref<WorkbenchContext | null>(null)
 let bridge: ReturnType<typeof createBootstrapBridge> | undefined
+let readyTimer: ReturnType<typeof setInterval> | undefined
 
 provide(PIXLAB_PROJECT_CONTEXT, context)
 
@@ -56,6 +57,10 @@ async function bootstrap(message: PixLabBootstrapMessage) {
     context.value = await getContext(projectCode)
     setActiveProjectContext(context.value)
     phase.value = 'ready'
+    if (readyTimer) {
+      clearInterval(readyTimer)
+      readyTimer = undefined
+    }
     notifyParent('wk-pixlab.authenticated', message.nonce)
   } catch (cause) {
     phase.value = 'error'
@@ -73,6 +78,7 @@ async function start() {
   if (!hasWorkbenchSessionHint(projectCode)) {
     phase.value = 'waiting'
     bridge.announceReady()
+    readyTimer = setInterval(() => bridge?.announceReady(), 1000)
     return
   }
   phase.value = 'loading'
@@ -82,6 +88,7 @@ async function start() {
       forgetWorkbenchSession(projectCode)
       phase.value = 'waiting'
       bridge.announceReady()
+      readyTimer = setInterval(() => bridge?.announceReady(), 1000)
       return
     }
     context.value = await getContext(projectCode)
@@ -108,6 +115,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   bridge?.dispose()
+  if (readyTimer) clearInterval(readyTimer)
   setActiveProjectContext(null)
   clearWorkbenchSession()
 })

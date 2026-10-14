@@ -1,4 +1,13 @@
 import { get, post, put, del } from "../../utils/request";
+import { getActiveProjectContext } from '@/pixlab-workbench/context';
+
+function wikiReadPath(kbId: string, suffix: string): string {
+  const context = getActiveProjectContext();
+  if (context && context.knowledge_base.id === kbId) {
+    return `/api/v1/pixlab-workbench/projects/${encodeURIComponent(context.project_code)}/wiki${suffix}`;
+  }
+  return `/api/v1/knowledgebase/${kbId}/wiki${suffix}`;
+}
 
 // encodeSlugPath encodes each segment of a hierarchical wiki slug (e.g.
 // "foo/bar baz?") so the URL is safe while preserving the "/" separators
@@ -131,7 +140,7 @@ export function listWikiPages(kbId: string, params?: {
     });
   }
   const qs = query.toString();
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/pages${qs ? '?' + qs : ''}`);
+  return get(wikiReadPath(kbId, `/pages${qs ? '?' + qs : ''}`));
 }
 
 // listWikiFolders returns the direct child folders of parentId ("" = root),
@@ -145,7 +154,7 @@ export function listWikiFolders(kbId: string, parentId = '', pageTypes = '') {
   if (parentId) query.set('parent_id', parentId);
   if (pageTypes) query.set('page_types', pageTypes);
   const qs = query.toString();
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/folders${qs ? '?' + qs : ''}`);
+  return get(wikiReadPath(kbId, `/folders${qs ? '?' + qs : ''}`));
 }
 
 // createWikiFolder creates a new empty folder under parentId ("" = root).
@@ -179,7 +188,7 @@ export function createWikiPage(kbId: string, data: Partial<WikiPage>) {
 }
 
 export function getWikiPage(kbId: string, slug: string) {
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/pages/${encodeSlugPath(slug)}`);
+  return get(wikiReadPath(kbId, `/pages/${encodeSlugPath(slug)}`));
 }
 
 // WikiPageUpdatePayload is a partial update: absent fields keep their stored
@@ -296,7 +305,7 @@ export function getWikiIndex(
   }
   const qs = query.toString();
   const suffix = qs ? `?${qs}` : '';
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/index${suffix}`);
+  return get(wikiReadPath(kbId, `/index${suffix}`));
 }
 
 export interface WikiGraphQueryParams {
@@ -324,17 +333,17 @@ export function getWikiGraph(kbId: string, params?: WikiGraphQueryParams) {
     }
   }
   const qs = query.toString();
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/graph${qs ? '?' + qs : ''}`);
+  return get(wikiReadPath(kbId, `/graph${qs ? '?' + qs : ''}`));
 }
 
 export function getWikiStats(kbId: string) {
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/stats`);
+  return get(wikiReadPath(kbId, '/stats'));
 }
 
 export function searchWikiPages(kbId: string, q: string, limit?: number) {
   const params = new URLSearchParams({ q });
   if (limit) params.set('limit', String(limit));
-  return get(`/api/v1/knowledgebase/${kbId}/wiki/search?${params.toString()}`);
+  return get(wikiReadPath(kbId, `/search?${params.toString()}`));
 }
 
 export function listWikiIssues(kbId: string, slug?: string, status?: string) {
